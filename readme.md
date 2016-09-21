@@ -1,4 +1,4 @@
-# wireshark的protobuf协议的插件 #
+# wireshark的protobuf协议插件 #
 * 首先打开libecho工程，修改config.xml文件，改成对应的协议，编译成libecho.lib
 * 下载wireshark 2.2的src包
 * 复制evil工程到plugin目录下，修改总CMake文件加入evil工程

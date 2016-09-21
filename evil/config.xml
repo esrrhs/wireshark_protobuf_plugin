@@ -1,0 +1,7 @@
+<Msg>  
+	<Config port="8888"  proto="GameProtos.proto" clientregid="1" serverregid="101"  regkey="aaa" key="bbb"/>  
+	
+	<MsgId id="1"   name="MsgName1"/>  
+	<MsgId id="2"   name="MsgName2"/>  
+	
+</Msg>  

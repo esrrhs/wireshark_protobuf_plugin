@@ -38,7 +38,7 @@ void MyLog(const char * file, const char * func, int pos, const char *fmt, ...)
 	struct tm * tptr;
 	va_list ap;
 	
-	pLog = fopen("evil_zjh.log", "a+");
+	pLog = fopen("evil_myname.log", "a+");
 	if (pLog == NULL)
 	{
 		return;
@@ -96,7 +96,7 @@ static int dissect_evil_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *t
 
     MYLOG("tvb_reported_length %d tvb_reported_length %d", tvb_reported_length(tvb), tvb_reported_length(tvb));
     	
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "zjh");//显示协议
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "myname");//显示协议
     col_clear(pinfo->cinfo, COL_INFO);
 
     if (!tree) 
@@ -172,7 +172,7 @@ proto_register_evil(void)
                 &hf_evil_hdr_msg_packetid,
                 {
                     "Packet Id",
-                    "zjh.packetid",
+                    "myname.packetid",
                     FT_INT32,
                     BASE_DEC,
                     NULL,
@@ -185,7 +185,7 @@ proto_register_evil(void)
                 &hf_evil_hdr_msg_packetname,
                 {
                     "Packet Name",
-                    "zjh.packetname",
+                    "myname.packetname",
                     FT_STRING,
                     BASE_NONE,
                     NULL,
@@ -198,7 +198,7 @@ proto_register_evil(void)
                 &hf_evil_hdr_msg_datasize,
                 {
                     "Msg Data Size",
-                    "zjh.datasize",
+                    "myname.datasize",
                     FT_INT32,
                     BASE_DEC,
                     NULL,
@@ -211,7 +211,7 @@ proto_register_evil(void)
                 &hf_evil_hdr_msg_body,
                 {
                     "Msg Body",
-                    "zjh.msgbody",
+                    "myname.msgbody",
                     FT_STRING,
                     BASE_NONE,
                     NULL,
@@ -233,9 +233,9 @@ proto_register_evil(void)
 
     /* Register the protocol name and description */
     proto_evil = proto_register_protocol(
-        "Zha Jin Hua",
-        "zjh",
-        "zjh");
+        "myname",
+        "myname",
+        "myname");
 
 	MYLOG("proto_register_protocol proto_evil = %d", proto_evil);
 

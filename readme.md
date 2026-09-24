@@ -1,5 +1,7 @@
 # wireshark-protobuf-plugin
 
+**English** | [中文](README_zh.md)
+
 A **Wireshark dissector plugin** that decodes custom TCP streams carrying
 [Protocol Buffers (protobuf)](https://protobuf.dev/) messages at runtime –
 no code generation required.

@@ -19,32 +19,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake protobuf-compiler libprotobuf-dev wireshark-dev tshark python3
 
-      - name: Build libecho & Run Tests
+      - name: Build libecho & Run Tests (CTest)
         run: |
           cmake -S libecho -B libecho/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
           cmake --build libecho/build --config Release
           ctest --test-dir libecho/build --output-on-failure
 
-      - name: Build Wireshark Plugin & End-to-End Test with tshark
+      - name: Prepare Test PCAP & Configuration
         run: |
-          # 1. Compile evil plugin against installed Wireshark dev headers
-          mkdir -p build_evil
-          gcc -shared -fPIC -DPACKAGE=\"evil\" -DVERSION=\"1.0.0\" -DPLUGIN_VERSION=\"1.0.0\" \
-            -DVERSION_RELEASE=\"$(pkg-config --modversion wireshark | cut -d. -f1,2)\" \
-            -DHAVE_PLUGINS=1 $(pkg-config --cflags wireshark) \
-            -Ievil -Ilibecho/libecho evil/packet-evil.c evil/plugin.c \
-            libecho/build/libecho.a -lprotobuf -lstdc++ -o build_evil/evil.so
-
-          # 2. Install plugin to personal plugins directory
-          WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
-          PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
-          mkdir -p "$PLUGIN_DIR"
-          cp build_evil/evil.so "$PLUGIN_DIR/"
-
-          # Verify plugin registration
-          tshark -G plugins | grep evil.so
-
-          # 3. End-to-End verification: generate pcap and test tshark parsing
           mkdir -p run_test
           cp libecho/test/test.proto run_test/
           cp libecho/test/config.xml run_test/
@@ -88,11 +70,36 @@ jobs:
               f.write(gh + ph + eth)
           EOF
 
+      - name: E2E Test: C/C++ Binary Plugin
+        run: |
+          mkdir -p build_evil
+          gcc -shared -fPIC -DPACKAGE=\"evil\" -DVERSION=\"1.0.0\" -DPLUGIN_VERSION=\"1.0.0\" \
+            -DVERSION_RELEASE=\"$(pkg-config --modversion wireshark | cut -d. -f1,2)\" \
+            -DHAVE_PLUGINS=1 $(pkg-config --cflags wireshark) \
+            -Ievil -Ilibecho/libecho evil/packet-evil.c evil/plugin.c \
+            libecho/build/libecho.a -lprotobuf -lstdc++ -o build_evil/evil.so
+
+          WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
+          PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
+          mkdir -p "$PLUGIN_DIR"
+          cp build_evil/evil.so "$PLUGIN_DIR/"
+
+          tshark -G plugins | grep evil.so
+
           cd run_test
           output=$(tshark -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
-          echo "TShark Output: $output"
+          echo "C++ Plugin Output: $output"
           echo "$output" | grep "testpkg.LoginRequest"
-          echo "End-to-End Wireshark Plugin Verification PASSED!"
+          rm -f "$PLUGIN_DIR/evil.so"
+
+      - name: E2E Test: Lua Script Plugin
+        run: |
+          cd run_test
+          # Run tshark loading Lua plugin directly with -X lua_script:
+          output=$(tshark -X lua_script:../lua/packet-evil.lua -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
+          echo "Lua Plugin Output: $output"
+          echo "$output" | grep "testpkg.LoginRequest"
+          echo "All E2E Tests (C++ and Lua) PASSED!"
 
   test-windows:
     name: Build & Test (Windows)

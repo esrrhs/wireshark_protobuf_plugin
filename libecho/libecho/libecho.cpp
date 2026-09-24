@@ -65,26 +65,59 @@ static DiskSourceTree               *g_sourceTree = nullptr;
 static Importer                     *g_importer  = nullptr;
 static DynamicMessageFactory        *g_factory   = nullptr;
 
+static bool try_load_file(const std::string &path)
+{
+    FILE *fp = fopen(path.c_str(), "rb");
+    if (fp) {
+        fclose(fp);
+        return true;
+    }
+    return false;
+}
+
 /* -----------------------------------------------------------------------
  * C API: ini_msg
  *   Reads config.xml, imports the .proto file, builds the descriptor map.
  * --------------------------------------------------------------------- */
 extern "C" void ini_msg()
 {
-    if (!g_config.LoadCfg("config.xml")) {
-        MYLOG("LoadCfg failed – aborting");
+    std::string cfg_path = "config.xml";
+    std::string proto_dir = "./";
+
+    // MSVC multi-config builds place the binary under Release/Debug; also
+    // allow parent dirs so ctest / manual runs from the build root still work.
+    const std::vector<std::string> search_dirs = {
+        "./", "Release/", "Debug/", "../", "../Release/", "../Debug/"
+    };
+    for (const auto &dir : search_dirs) {
+        if (try_load_file(dir + "config.xml")) {
+            cfg_path = dir + "config.xml";
+            proto_dir = dir;
+            break;
+        }
+    }
+
+    if (!g_config.LoadCfg(cfg_path)) {
+        MYLOG("LoadCfg(%s) failed – aborting", cfg_path.c_str());
+        std::cerr << "[libecho] LoadCfg(" << cfg_path << ") failed" << std::endl;
         return;
     }
 
     const std::string &protoname = g_config.GetMsg().m_STConfig.m_strproto;
-    MYLOG("proto file: %s", protoname.c_str());
+    MYLOG("proto file: %s in dir: %s", protoname.c_str(), proto_dir.c_str());
 
     delete g_factory;     g_factory     = nullptr;
     delete g_importer;    g_importer    = nullptr;
     delete g_sourceTree;  g_sourceTree  = nullptr;
 
     g_sourceTree   = new DiskSourceTree();
-    g_sourceTree->MapPath("", "./");   // look up .proto in CWD
+    g_sourceTree->MapPath("", "./");
+    if (proto_dir != "./") {
+        g_sourceTree->MapPath("", proto_dir);
+    }
+    g_sourceTree->MapPath("", "Release/");
+    g_sourceTree->MapPath("", "Debug/");
+    g_sourceTree->MapPath("", "../");
 
     g_importer     = new Importer(g_sourceTree, nullptr);
     g_factory      = new DynamicMessageFactory();
@@ -92,6 +125,7 @@ extern "C" void ini_msg()
     const FileDescriptor *fd = g_importer->Import(protoname);
     if (!fd) {
         MYLOG("Failed to import %s", protoname.c_str());
+        std::cerr << "[libecho] Failed to import proto: " << protoname << std::endl;
         return;
     }
 

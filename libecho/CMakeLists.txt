@@ -53,7 +53,7 @@ if(BUILD_TESTS)
     target_link_libraries(echo_test PRIVATE echo ${PROTOBUF_TARGETS})
     target_include_directories(echo_test PRIVATE ${Protobuf_INCLUDE_DIRS})
 
-    # Copy test config and test proto to build directory
+    # Copy test config and test proto to build directories
     add_custom_command(TARGET echo_test POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/test/config.xml
@@ -61,7 +61,14 @@ if(BUILD_TESTS)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test.proto
             $<TARGET_FILE_DIR:echo_test>/test.proto
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/config.xml
+            ${CMAKE_CURRENT_BINARY_DIR}/config.xml
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test.proto
+            ${CMAKE_CURRENT_BINARY_DIR}/test.proto
     )
 
     add_test(NAME echo_unit_test COMMAND echo_test)
+    set_tests_properties(echo_unit_test PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:echo_test>")
 endif()

@@ -119,4 +119,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTS=ON
           cmake --build libecho/build --config Release
+          Copy-Item libecho/test/config.xml libecho/build/ -Force
+          Copy-Item libecho/test/test.proto libecho/build/ -Force
+          if (Test-Path libecho/build/Release) {
+            Copy-Item libecho/test/config.xml libecho/build/Release/ -Force
+            Copy-Item libecho/test/test.proto libecho/build/Release/ -Force
+          }
           ctest --test-dir libecho/build -C Release --output-on-failure

@@ -33,6 +33,7 @@ target_include_directories(echo PUBLIC
 
 target_link_libraries(echo PUBLIC
     ${Protobuf_LIBRARIES}
+    ${Protobuf_PROTOC_LIBRARIES}
 )
 
 # Optional: build the test executable and enable ctest
@@ -40,7 +41,7 @@ option(BUILD_TESTS "Build libecho test binary" ON)
 if(BUILD_TESTS)
     enable_testing()
     add_executable(echo_test test/test.cpp)
-    target_link_libraries(echo_test PRIVATE echo ${Protobuf_LIBRARIES})
+    target_link_libraries(echo_test PRIVATE echo ${Protobuf_LIBRARIES} ${Protobuf_PROTOC_LIBRARIES})
     target_include_directories(echo_test PRIVATE ${Protobuf_INCLUDE_DIRS})
 
     # Copy test config and test proto to build directory

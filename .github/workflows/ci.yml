@@ -70,7 +70,7 @@ jobs:
               f.write(gh + ph + eth)
           EOF
 
-      - name: E2E Test: C/C++ Binary Plugin
+      - name: "E2E Test: C/C++ Binary Plugin"
         run: |
           mkdir -p build_evil
           gcc -shared -fPIC -DPACKAGE=\"evil\" -DVERSION=\"1.0.0\" -DPLUGIN_VERSION=\"1.0.0\" \
@@ -92,7 +92,7 @@ jobs:
           echo "$output" | grep "testpkg.LoginRequest"
           rm -f "$PLUGIN_DIR/evil.so"
 
-      - name: E2E Test: Lua Script Plugin
+      - name: "E2E Test: Lua Script Plugin"
         run: |
           cd run_test
           # Run tshark loading Lua plugin directly with -X lua_script:

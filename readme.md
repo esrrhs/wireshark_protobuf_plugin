@@ -6,7 +6,11 @@ A **Wireshark dissector plugin** that decodes custom TCP streams carrying
 [Protocol Buffers (protobuf)](https://protobuf.dev/) messages at runtime –
 no code generation required.
 
-Supports **Wireshark 3.x / 4.x** on Linux and Windows.
+Two implementations are provided:
+1. **Lua Plugin (`lua/packet-evil.lua`)**: Lightweight, cross-platform (Windows/Linux/macOS), zero compilation required, supports hot-reloading (`Ctrl+Shift+L`). Recommended for most users.
+2. **C/C++ Binary Plugin (`evil/` + `libecho/`)**: High performance, native Protobuf dynamic reflection, ideal for heavy traffic or custom packet processing.
+
+Supports **Wireshark 2.6 / 3.x / 4.x** on Linux and Windows.
 
 ---
 
@@ -20,12 +24,11 @@ TCP packet
   └─────────────────────────────────────────────────┘
 ```
 
-1. The plugin reads `config.xml` to learn the TCP **port**, the `.proto`
-   filename, and the **packet-id → message-name** mapping.
-2. At capture time it imports the `.proto` file via the protobuf reflection
-   API (no `protoc` invocation needed) and deserialises every message on the
-   fly.
-3. Each field is shown as a child node in the Wireshark packet tree.
+1. The plugin reads `config.xml` (or preference settings) to obtain the TCP **port**, the `.proto` filename, and the **packet-id → message-name** mapping.
+2. At capture time:
+   - **Lua plugin**: Parses the 6-byte header and passes the remaining Protobuf payload to Wireshark's built-in Protobuf dissector with the corresponding message name.
+   - **C++ plugin**: Dynamically parses `.proto` using Google Protobuf reflection (`Importer` + `DynamicMessageFactory`) and deserializes every field into the tree.
+3. Every field is rendered hierarchically in the Wireshark packet tree and is fully filterable.
 
 ---
 
@@ -33,164 +36,124 @@ TCP packet
 
 ```
 wireshark_protobuf_plugin/
-├── evil/               Wireshark dissector plugin (C)
-│   ├── packet-evil.c   Dissector – main dissection logic
-│   ├── plugin.c        Wireshark plugin entry points
+├── lua/                    Lua dissector plugin (Zero compilation)
+│   └── packet-evil.lua     Single-file Lua dissector with TCP desegmentation
+├── evil/                   Wireshark dissector plugin (C binary)
+│   ├── packet-evil.c       Dissector – main dissection logic
+│   ├── plugin.c            Wireshark plugin entry points
 │   ├── packet-evil.h
 │   ├── moduleinfo.h
-│   └── CMakeLists.txt  (integrated into Wireshark source tree)
-├── libecho/            C++ helper library
-│   ├── CMakeLists.txt  (standalone build)
+│   └── CMakeLists.txt      (integrated into Wireshark source tree)
+├── libecho/                C++ helper library for C plugin
+│   ├── CMakeLists.txt      (standalone build with CTest)
 │   ├── libecho/
-│   │   ├── libecho.h   C API exposed to the dissector
-│   │   ├── libecho.cpp Protobuf reflection + XML config loader
-│   │   ├── config.h    Auto-generated XML config class
-│   │   ├── tinyxml.*   Embedded TinyXML parser
+│   │   ├── libecho.h       C API exposed to the dissector
+│   │   ├── libecho.cpp     Protobuf reflection + XML config loader
+│   │   ├── config.h        XML config class
+│   │   ├── tinyxml.*       Embedded TinyXML parser
 │   │   └── tinystr.*
 │   └── test/
-│       └── test.cpp    Simple smoke-test
-├── config.xml          Runtime config (copy to Wireshark plugin dir)
-└── README.md
+│       ├── test.cpp        libecho unit tests
+│       ├── test.proto      Test proto definition
+│       └── config.xml      Test XML configuration
+├── .github/workflows/
+│   └── ci.yml              GitHub Actions CI (Unit tests + C++ E2E + Lua E2E)
+├── config.xml              Runtime config (copy to Wireshark plugin dir)
+├── README.md               Main documentation (English)
+└── README_zh.md            Secondary documentation (Chinese)
 ```
 
 ---
 
-## Build
+## Solution 1: Lua Plugin (Recommended)
+
+### Installation
+Copy [`lua/packet-evil.lua`](file:///home/project/wireshark_protobuf_plugin/lua/packet-evil.lua), `config.xml`, and your `.proto` file to your Wireshark Personal Plugins directory:
+- **Linux**: `~/.local/lib/wireshark/plugins/`
+- **Windows**: `%APPDATA%\Wireshark\plugins\`
+- **macOS**: `~/.config/wireshark/plugins/`
+
+### Features
+- **Zero compilation**: Works immediately without building `.so` or `.dll`.
+- **Hot reload**: Press `Ctrl + Shift + L` in Wireshark to reload scripts after edits.
+- **TCP Stream Reassembly**: Automatically handles TCP segmentation and fragment reassembly.
+
+---
+
+## Solution 2: C/C++ Binary Plugin
 
 ### Prerequisites
 
 | Tool | Minimum version |
 |------|----------------|
 | CMake | 3.16 |
-| C compiler | GCC 9 / Clang 10 / MSVC 2019 |
-| C++ compiler | same, with C++17 support |
-| Wireshark source | 3.6 or 4.x |
-| protobuf | 3.12+ (or 4.x / protobuf 3.21+) |
+| C/C++ compiler | GCC 9 / Clang 10 / MSVC 2019 (C++17) |
+| Wireshark dev headers | 2.6 / 3.x / 4.x |
+| Protobuf | 3.5+ (3.x / 4.x / 21+) |
 
 ### Step 1 – build libecho
 
 ```bash
 cd libecho
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
 cmake --build build
-# produces build/libecho.a  (or libecho.lib on Windows)
+ctest --test-dir build --output-on-failure
 ```
 
-### Step 2 – integrate with the Wireshark source tree
+### Step 2 – build evil plugin
 
+**Standalone compilation (Linux):**
 ```bash
-# Download the Wireshark source that matches your installed binary:
-# https://www.wireshark.org/download.html
-
-# Copy the plugin folder into the Wireshark source tree:
-cp -r evil  <wireshark-src>/plugins/epan/
-
-# Register the plugin in the Wireshark top-level CMakeLists.txt.
-# Find the block that lists epan plugins and add "evil":
-#   plugins/epan/evil
-# (exact location depends on the Wireshark version)
+WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
+gcc -shared -fPIC -DPACKAGE="evil" -DVERSION="1.0.0" -DPLUGIN_VERSION="1.0.0" \
+    -DVERSION_RELEASE="$WS_VER" -DHAVE_PLUGINS=1 $(pkg-config --cflags wireshark) \
+    -Ievil -Ilibecho/libecho evil/packet-evil.c evil/plugin.c \
+    libecho/build/libecho.a -lprotobuf -lstdc++ -o evil.so
 ```
 
-Edit `<wireshark-src>/CMakeLists.txt` – find:
-```cmake
-set(PLUGIN_SRC_DIRS
-    plugins/epan/ethercat
-    plugins/epan/gryphon
-    ...
-)
-```
-and add:
-```cmake
-    plugins/epan/evil
-```
-
-### Step 3 – configure and build Wireshark with the plugin
-
-```bash
-cd <wireshark-src>
-cmake -S . -B build \
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-      -DENABLE_PLUGINS=ON \
-      -Dlibecho_DIR=<absolute-path-to>/libecho/build
-cmake --build build --target evil
-```
-
-The resulting shared library is placed in:
-```
-build/run/plugins/<version>/epan/evil.so   # Linux
-build/run/plugins/<version>/epan/evil.dll  # Windows
-```
+**Or integrate into Wireshark source tree:**
+Copy `evil/` to `<wireshark-src>/plugins/epan/evil`, add to `PLUGIN_SRC_DIRS` in Wireshark's root `CMakeLists.txt`, and build with `cmake --build build --target evil`.
 
 ---
 
-## Runtime setup
-
-Copy the following files into your Wireshark **plugin directory**
-(`Help → About Wireshark → Folders → Personal Plugins`):
-
-```
-evil.so / evil.dll
-config.xml
-YourProtos.proto
-```
-
-### config.xml format
+## Configuration (`config.xml`)
 
 ```xml
 <Msg>
-  <Config port="8888"
-          proto="YourProtos.proto"
+  <Config port="12345"
+          proto="GameProtos.proto"
           clientregid="1"
           serverregid="101"
           regkey="aaa"
           key="bbb"/>
 
   <!-- Map numeric packet-ids to proto message names -->
-  <MsgId id="1"  name="LoginRequest"/>
-  <MsgId id="2"  name="LoginResponse"/>
+  <MsgId id="1001" name="testpkg.LoginRequest"/>
+  <MsgId id="1002" name="testpkg.LoginResponse"/>
 </Msg>
 ```
 
-> **Note:** The `name` attribute must match a top-level message name in
-> your `.proto` file.  If your messages live in a package (e.g.
-> `package mygame;`), write the **fully-qualified** name:
-> `name="mygame.LoginRequest"`.
+> **Note:** If your message is in a protobuf package (e.g. `package testpkg;`), provide the fully qualified message name: `name="testpkg.LoginRequest"`.
 
 ---
 
 ## Usage in Wireshark
 
-1. Restart Wireshark after placing the files.
-2. In the display filter bar, type `myname` to show only your protocol.
-3. Useful filters:
-   - `myname.packetid == 1`
-   - `myname.packetname == "LoginRequest"`
-   - `myname.body contains "user_id"`
+1. Open Wireshark (or `tshark`).
+2. Filter expressions:
+   - Show protocol: `myname`
+   - Filter by Packet ID: `myname.packetid == 1001`
+   - Filter by Packet Name: `myname.packetname == "testpkg.LoginRequest"`
+   - Search in decoded body (C++ plugin): `myname.body contains "alice"`
 
 ---
 
-## Debug logging
+## Continuous Integration (CI)
 
-Compile with `-DEVIL_DEBUG_LOG` to enable file logging:
-
-```cmake
-target_compile_definitions(evil PRIVATE EVIL_DEBUG_LOG)
-```
-
-Log files are written to the directory from which Wireshark is launched:
-- `evil.log` – libecho runtime log
-- `evil.log` – dissector log (same file, different prefix lines)
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| Plugin not loaded | Check `Help → About → Plugins`. Ensure `.so`/`.dll` is in the right folder for your Wireshark version (`epan/` sub-dir required on 4.x). |
-| `(not initialized)` in body | `config.xml` or the `.proto` file is missing from the plugin dir. |
-| `(ParseFromArray failed)` | The raw bytes aren't valid for that message type. Check endianness / header offsets in `packet-evil.c`. |
-| ABI mismatch crash | Rebuild the plugin against the **exact** Wireshark source that matches your binary. |
+The project includes automated GitHub Actions CI ([`.github/workflows/ci.yml`](file:///home/project/wireshark_protobuf_plugin/.github/workflows/ci.yml)) testing:
+- **`libecho` Unit Tests** across Linux & Windows via `CTest`.
+- **C++ Plugin End-to-End Test**: Compiles `evil.so`, loads into `tshark`, generates real synthetic PCAP, and verifies dissector output and filters.
+- **Lua Plugin End-to-End Test**: Loads `packet-evil.lua` with `tshark -X lua_script:...`, dissects PCAP stream, and asserts field extraction.
 
 ---
 

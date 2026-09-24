@@ -4,6 +4,10 @@
 
 这是一个 **Wireshark 协议解析插件（Dissector Plugin）**，支持在运行期动态解析自定义 TCP 承载的 [Protocol Buffers (protobuf)](https://protobuf.dev/) 消息，**无需预先代码生成（Code Generation）**。
 
+本项目同时提供两种方案：
+1. **Lua 脚本插件方案（推荐，零编译成本）**：单文件脚本 [`lua/packet-evil.lua`](file:///home/project/wireshark_protobuf_plugin/lua/packet-evil.lua)，免编译，支持跨平台（Windows / Linux / macOS），支持 `Ctrl+Shift+L` 热重载，直接转交 Wireshark 内置 Protobuf 解析器。
+2. **C/C++ 二进制插件方案（高性能）**：基于 `evil/` + `libecho/`，利用 Google Protobuf 原生运行时反射，适合超大并发流量或需要私有加解密的场景。
+
 兼容 **Wireshark 2.6 / 3.x / 4.x**（支持 Linux 与 Windows）。
 
 ---
@@ -18,9 +22,11 @@ TCP 应用层数据包结构：
   └─────────────────────────────────────────────────┘
 ```
 
-1. 插件启动时读取 `config.xml`，获取目标 TCP **端口号**、对应的 `.proto` **协议文件名** 以及 **消息 ID（packet-id）到 Protobuf 消息类型名称（message-name）** 的映射规则。
-2. 捕获报文时，插件借助 Google Protobuf 的运行时反射与动态导入机制（`google::protobuf::compiler::Importer` 与 `DynamicMessageFactory`），实时载入 `.proto` 文件并进行反序列化，无需执行 `protoc` 生成 C++ 代码。
-3. 将解包出的字段作为树形子节点展示在 Wireshark 界面中，并支持按字段进行过滤筛选。
+1. **配置读取**：插件启动时读取 `config.xml`（或首选项），获取监听的 TCP **端口号**、对应的 `.proto` **协议文件名** 以及 **消息 ID（packet-id）到 Protobuf 消息类型名称（message-name）** 的映射规则。
+2. **抓包解析**：
+   - **Lua 方案**：解析 4 字节长度 + 2 字节 ID，自动处理 TCP 流分包与粘包重组，将剩余的二进制载荷挂载对应消息类型名称并移交 Wireshark 原生内置 Protobuf 解析引擎。
+   - **C++ 方案**：利用 Google Protobuf 运行时反射机制（`Importer` + `DynamicMessageFactory`）进行动态反序列化，解出全部字段输出到树形节点。
+3. **展示与过滤**：Wireshark 数据包详情中将各字段以树形展示，支持完整过滤语法。
 
 ---
 
@@ -28,7 +34,9 @@ TCP 应用层数据包结构：
 
 ```
 wireshark_protobuf_plugin/
-├── evil/                   Wireshark 解析器插件源码 (C)
+├── lua/                    Lua 脚本解析器插件（推荐，免编译）
+│   └── packet-evil.lua     单文件 Lua 解析器（支持 TCP 粘包重组与 Protobuf 转发）
+├── evil/                   C 语言 Wireshark 插件动态库源码
 │   ├── packet-evil.c       核心解析逻辑（Dissector 实现）
 │   ├── plugin.c            Wireshark 插件动态加载入口
 │   ├── packet-evil.h
@@ -47,7 +55,7 @@ wireshark_protobuf_plugin/
 │       ├── test.proto      测试协议
 │       └── config.xml      测试配置
 ├── .github/workflows/
-│   └── ci.yml              GitHub Actions CI 流水线（Linux/Windows 单元测试与端到端测试）
+│   └── ci.yml              GitHub Actions CI 流水线（单元测试 + C++ E2E + Lua E2E）
 ├── config.xml              运行时示例配置文件
 ├── README.md               英文主文档
 └── README_zh.md            中文说明文档
@@ -55,71 +63,53 @@ wireshark_protobuf_plugin/
 
 ---
 
-## 编译指南
+## 方案一：Lua 插件（推荐）
+
+### 安装步骤
+将 [`lua/packet-evil.lua`](file:///home/project/wireshark_protobuf_plugin/lua/packet-evil.lua)、`config.xml` 以及您的 `.proto` 文件复制到 Wireshark 插件目录即可：
+- **Linux 路径**：`~/.local/lib/wireshark/plugins/`
+- **Windows 路径**：`%APPDATA%\Wireshark\plugins\`
+- **macOS 路径**：`~/.config/wireshark/plugins/`
+
+### 特性与优势
+- **零编译**：跨平台直接可用，无需针对不同 Wireshark 版本折腾编译器和头文件。
+- **热重载**：修改脚本或配置后，在 Wireshark 中按下 `Ctrl + Shift + L` 即可立即刷新。
+- **TCP 流粘包/拆包重组**：内置 `desegment_offset` 与 `desegment_len` 处理机制。
+
+---
+
+## 方案二：C/C++ 二进制插件
 
 ### 环境依赖
-
-| 依赖组件 | 最低版本要求 |
-|---------|-------------|
-| CMake | 3.16+ |
-| C 编译器 | GCC 9+ / Clang 10+ / MSVC 2019+ |
-| C++ 编译器 | 支持 C++17 的编译器 |
-| Protobuf | 3.5+ (支持 3.x / 4.x / 21+) |
-| Wireshark 开发包 | Wireshark 2.6 / 3.x / 4.x 开发头文件 |
+- CMake 3.16+
+- 支持 C++17 的编译器（GCC 9+ / Clang 10+ / MSVC 2019+）
+- Protobuf 3.5+ (支持 3.x / 4.x / 21+)
+- Wireshark 2.6 / 3.x / 4.x 开发头文件
 
 ### 步骤 1：编译辅助库 libecho
-
 ```bash
 cd libecho
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
 cmake --build build
-
-# 运行单元测试
 ctest --test-dir build --output-on-failure
 ```
-编译产物位于 `build/libecho.a`（Linux）或 `build/libecho.lib`（Windows）。
-
----
 
 ### 步骤 2：编译 Wireshark 插件
-
-#### 方式 A：独立编译（针对已安装 Wireshark 的开发环境）
-以 Linux 为例：
+**独立编译（Linux）：**
 ```bash
-# 获取本机安装的 Wireshark 版本分支（如 2.6、3.6、4.2 等）
 WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
-
 gcc -shared -fPIC -DPACKAGE="evil" -DVERSION="1.0.0" -DPLUGIN_VERSION="1.0.0" \
     -DVERSION_RELEASE="$WS_VER" -DHAVE_PLUGINS=1 $(pkg-config --cflags wireshark) \
     -Ievil -Ilibecho/libecho evil/packet-evil.c evil/plugin.c \
     libecho/build/libecho.a -lprotobuf -lstdc++ -o evil.so
 ```
 
-#### 方式 B：集成至 Wireshark 源码树编译
-1. 下载与您安装的 Wireshark 大版本匹配的源码。
-2. 将 `evil` 目录拷贝到 Wireshark 源码目录下的 `plugins/epan/evil`。
-3. 修改 Wireshark 的主 `CMakeLists.txt`，在插件列表变量中追加 `plugins/epan/evil`。
-4. 运行 CMake 构建：
-```bash
-cd <wireshark-source>
-cmake -S . -B build -DENABLE_PLUGINS=ON
-cmake --build build --target evil
-```
+**集成至 Wireshark 源码树编译：**
+将 `evil/` 拷贝到 `<wireshark-src>/plugins/epan/evil`，在主 CMakeLists.txt 中注册后执行 `cmake --build build --target evil`。
 
 ---
 
-## 插件安装与配置
-
-将编译生成的插件文件及配置放置于 Wireshark 的插件目录：
-- Linux 路径：`~/.local/lib/wireshark/plugins/<版本号>/epan/`
-- Windows 路径：`%APPDATA%\Wireshark\plugins\<版本号>\epan\`
-
-需要放置的文件：
-1. `evil.so`（Linux）或 `evil.dll`（Windows）
-2. `config.xml`（协议配置及映射规则）
-3. 对应的 `.proto` 文件（放于启动目录或 Wireshark 插件目录）
-
-### config.xml 结构示例
+## 配置文件说明 (`config.xml`)
 
 ```xml
 <Msg>
@@ -132,35 +122,29 @@ cmake --build build --target evil
             key="bbb"/>
 
     <!-- 消息 ID 映射到 proto 中定义的 Message 名称 -->
-    <!-- 如果 proto 包含 package（例如 package mygame;），需填写全称：mygame.LoginRequest -->
-    <MsgId id="1001" name="mygame.LoginRequest"/>
-    <MsgId id="1002" name="mygame.LoginResponse"/>
+    <!-- 如果 proto 包含 package（例如 package testpkg;），需填写全称：testpkg.LoginRequest -->
+    <MsgId id="1001" name="testpkg.LoginRequest"/>
+    <MsgId id="1002" name="testpkg.LoginResponse"/>
 </Msg>
 ```
 
 ---
 
-## Wireshark 抓包与过滤
+## Wireshark 过滤语法示例
 
-重启 Wireshark（或运行 `tshark`）后，插件将自动激活。
-
-在顶部显示过滤器输入过滤表达式：
 - 按协议过滤：`myname`
 - 按消息 ID 过滤：`myname.packetid == 1001`
-- 按消息名称过滤：`myname.packetname == "mygame.LoginRequest"`
-- 检索 Protobuf 字段内容：`myname.body contains "alice"`
+- 按消息名称过滤：`myname.packetname == "testpkg.LoginRequest"`
+- 检索 Protobuf 字段内容（C++ 插件）：`myname.body contains "alice"`
 
 ---
 
-## 常见问题排查
+## 持续集成流水线 (CI)
 
-| 现象 | 排查方案 |
-|------|---------|
-| 插件未加载 | 打开 Wireshark 菜单 `帮助(Help) -> 关于(About Wireshark) -> 插件(Plugins)`，查看是否存在 `evil.so` / `evil.dll`。检查插件存放路径中的版本目录是否与 Wireshark 版本精确匹配（如 4.x 需位于 `epan/` 子目录）。 |
-| 报文中显示 `(not initialized)` | 未能在当前工作目录或插件目录找到 `config.xml` 或配置中声明的 `.proto` 文件。 |
-| 报文中显示 `(unknown message id)` | 收到的消息包 ID 未在 `config.xml` 的 `<MsgId>` 列表中配置。 |
-| 报文中显示 `(ParseFromArray failed)` | 二进制数据不匹配该 Protobuf 消息结构，请核对包头偏移量（4字节长度 + 2字节ID）或字节序。 |
-| 加载时 Wireshark 崩溃或报 ABI 错误 | Wireshark 插件 ABI 对版本非常严格，必须使用与目标 Wireshark 相同大版本及编译环境重新编译插件。 |
+仓库集成了 GitHub Actions 自动化流水线（[`.github/workflows/ci.yml`](file:///home/project/wireshark_protobuf_plugin/.github/workflows/ci.yml)），在每次提交时执行：
+1. **`libecho` 跨平台单元测试**（Linux / Windows 矩阵通过 `CTest` 执行）。
+2. **C++ 插件端到端验证**：编译 `evil.so` 并加载至 Wireshark/tshark，使用 Python 构造真实 TCP 数据包 pcap 进行解析过滤校验。
+3. **Lua 插件端到端验证**：使用 `tshark -X lua_script:...` 直接加载 `packet-evil.lua`，并对生成的 pcap 报文进行端到端抓包校验。
 
 ---
 

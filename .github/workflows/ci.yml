@@ -17,13 +17,82 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake protobuf-compiler libprotobuf-dev
+          sudo apt-get install -y cmake protobuf-compiler libprotobuf-dev wireshark-dev tshark python3
 
       - name: Build libecho & Run Tests
         run: |
           cmake -S libecho -B libecho/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
           cmake --build libecho/build --config Release
           ctest --test-dir libecho/build --output-on-failure
+
+      - name: Build Wireshark Plugin & End-to-End Test with tshark
+        run: |
+          # 1. Compile evil plugin against installed Wireshark dev headers
+          mkdir -p build_evil
+          gcc -shared -fPIC -DPACKAGE=\"evil\" -DVERSION=\"1.0.0\" -DPLUGIN_VERSION=\"1.0.0\" \
+            -DVERSION_RELEASE=\"$(pkg-config --modversion wireshark | cut -d. -f1,2)\" \
+            -DHAVE_PLUGINS=1 $(pkg-config --cflags wireshark) \
+            -Ievil -Ilibecho/libecho evil/packet-evil.c evil/plugin.c \
+            libecho/build/libecho.a -lprotobuf -lstdc++ -o build_evil/evil.so
+
+          # 2. Install plugin to personal plugins directory
+          WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
+          PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
+          mkdir -p "$PLUGIN_DIR"
+          cp build_evil/evil.so "$PLUGIN_DIR/"
+
+          # Verify plugin registration
+          tshark -G plugins | grep evil.so
+
+          # 3. End-to-End verification: generate pcap and test tshark parsing
+          mkdir -p run_test
+          cp libecho/test/test.proto run_test/
+          cp libecho/test/config.xml run_test/
+
+          python3 - << 'EOF'
+          import struct, socket
+
+          def checksum(data):
+              if len(data) % 2:
+                  data += b"\x00"
+              s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+              while s >> 16:
+                  s = (s & 0xffff) + (s >> 16)
+              return ~s & 0xffff
+
+          def make_ip_tcp(src_ip, dst_ip, src_port, dst_port, payload):
+              total_len = 20 + 20 + len(payload)
+              ip_src = socket.inet_aton(src_ip)
+              ip_dst = socket.inet_aton(dst_ip)
+              ip_hdr_no_cksum = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_len, 54321, 0x4000, 64, socket.IPPROTO_TCP, 0, ip_src, ip_dst)
+              ip_hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_len, 54321, 0x4000, 64, socket.IPPROTO_TCP, checksum(ip_hdr_no_cksum), ip_src, ip_dst)
+
+              tcp_hdr_no_cksum = struct.pack("!HHIIHHHH", src_port, dst_port, 1000, 0, 0x5018, 8192, 0, 0)
+              pseudo_hdr = struct.pack("!4s4sBBH", ip_src, ip_dst, 0, socket.IPPROTO_TCP, 20 + len(payload))
+              tcp_hdr = struct.pack("!HHIIHHHH", src_port, dst_port, 1000, 0, 0x5018, 8192, checksum(pseudo_hdr + tcp_hdr_no_cksum + payload), 0)
+              return ip_hdr + tcp_hdr + payload
+
+          pb_body = bytes([
+              0x0a, 0x05, 0x61, 0x6c, 0x69, 0x63, 0x65,
+              0x12, 0x09, 0x73, 0x65, 0x63, 0x72, 0x65, 0x74, 0x31, 0x32, 0x33,
+              0x18, 0x2a
+          ])
+          app_payload = struct.pack("!IH", 2 + len(pb_body), 1001) + pb_body
+          ip_pkt = make_ip_tcp("192.168.1.10", "192.168.1.20", 50000, 12345, app_payload)
+
+          gh = struct.pack("=IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+          eth = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\x08\x00" + ip_pkt
+          ph = struct.pack("=IIII", 1700000000, 0, len(eth), len(eth))
+
+          with open("run_test/test.pcap", "wb") as f:
+              f.write(gh + ph + eth)
+          EOF
+
+          cd run_test
+          output=$(tshark -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
+          echo "TShark Output: $output"
+          echo "$output" | grep "testpkg.LoginRequest"
+          echo "End-to-End Wireshark Plugin Verification PASSED!"
 
   test-windows:
     name: Build & Test (Windows)

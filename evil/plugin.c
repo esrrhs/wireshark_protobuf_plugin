@@ -14,14 +14,22 @@
 /* plugins are shared libraries */
 #define WS_BUILD_DLL
 #include <ws_symbol_export.h>
+#include <epan/proto.h>
 
 #include "moduleinfo.h"
 
 #ifndef ENABLE_STATIC
 
+#ifndef VERSION_RELEASE
+# define VERSION_RELEASE "2.6"
+#endif
+
+WS_DLL_PUBLIC const char plugin_release[] = VERSION_RELEASE;
 WS_DLL_PUBLIC const char plugin_version[] = PLUGIN_VERSION;
+#if defined(WIRESHARK_VERSION_MAJOR)
 WS_DLL_PUBLIC const int  plugin_want_major = WIRESHARK_VERSION_MAJOR;
 WS_DLL_PUBLIC const int  plugin_want_minor = WIRESHARK_VERSION_MINOR;
+#endif
 
 extern void proto_register_evil(void);
 extern void proto_reg_handoff_evil(void);

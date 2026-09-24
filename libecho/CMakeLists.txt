@@ -34,9 +34,23 @@ target_link_libraries(echo PUBLIC
     ${Protobuf_LIBRARIES}
 )
 
-# Optional: build the test executable
-option(BUILD_TESTS "Build libecho test binary" OFF)
+# Optional: build the test executable and enable ctest
+option(BUILD_TESTS "Build libecho test binary" ON)
 if(BUILD_TESTS)
+    enable_testing()
     add_executable(echo_test test/test.cpp)
-    target_link_libraries(echo_test PRIVATE echo)
+    target_link_libraries(echo_test PRIVATE echo ${Protobuf_LIBRARIES})
+    target_include_directories(echo_test PRIVATE ${Protobuf_INCLUDE_DIRS})
+
+    # Copy test config and test proto to build directory
+    add_custom_command(TARGET echo_test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/config.xml
+            $<TARGET_FILE_DIR:echo_test>/config.xml
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test.proto
+            $<TARGET_FILE_DIR:echo_test>/test.proto
+    )
+
+    add_test(NAME echo_unit_test COMMAND echo_test)
 endif()

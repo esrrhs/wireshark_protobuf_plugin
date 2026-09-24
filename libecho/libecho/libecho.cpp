@@ -62,18 +62,17 @@ MyLog(const char *file, const char *func, int line, const char *fmt, ...)
 class SilentErrorCollector : public MultiFileErrorCollector
 {
 public:
-    void RecordError(absl::string_view filename, int line, int column,
-                     absl::string_view message) override
-    {
-        MYLOG("Proto error %s:%d:%d: %.*s",
-              std::string(filename).c_str(), line, column,
-              (int)message.size(), message.data());
-    }
-    /* pre-4.x protobuf compat */
     void AddError(const std::string &filename, int line, int column,
                   const std::string &message) override
     {
         MYLOG("Proto error %s:%d:%d: %s",
+              filename.c_str(), line, column, message.c_str());
+    }
+
+    void AddWarning(const std::string &filename, int line, int column,
+                    const std::string &message) override
+    {
+        MYLOG("Proto warning %s:%d:%d: %s",
               filename.c_str(), line, column, message.c_str());
     }
 };

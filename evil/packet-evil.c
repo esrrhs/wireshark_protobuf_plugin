@@ -17,7 +17,9 @@
 #include <epan/expert.h>
 #include <epan/reassemble.h>
 #include <epan/proto.h>
+#include <epan/dissectors/packet-tcp.h>
 
+#include "libecho.h"
 #include "packet-evil.h"
 
 /* -----------------------------------------------------------------------

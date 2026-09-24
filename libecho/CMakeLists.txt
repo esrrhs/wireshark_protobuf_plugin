@@ -31,17 +31,26 @@ target_include_directories(echo PUBLIC
     ${Protobuf_INCLUDE_DIRS}
 )
 
-target_link_libraries(echo PUBLIC
-    ${Protobuf_LIBRARIES}
-    ${Protobuf_PROTOC_LIBRARIES}
-)
+if(TARGET protobuf::libprotobuf)
+    set(PROTOBUF_TARGETS protobuf::libprotobuf)
+    if(TARGET protobuf::libprotoc)
+        list(APPEND PROTOBUF_TARGETS protobuf::libprotoc)
+    endif()
+else()
+    set(PROTOBUF_TARGETS ${Protobuf_LIBRARIES})
+    if(Protobuf_PROTOC_LIBRARIES)
+        list(APPEND PROTOBUF_TARGETS ${Protobuf_PROTOC_LIBRARIES})
+    endif()
+endif()
+
+target_link_libraries(echo PUBLIC ${PROTOBUF_TARGETS})
 
 # Optional: build the test executable and enable ctest
 option(BUILD_TESTS "Build libecho test binary" ON)
 if(BUILD_TESTS)
     enable_testing()
     add_executable(echo_test test/test.cpp)
-    target_link_libraries(echo_test PRIVATE echo ${Protobuf_LIBRARIES} ${Protobuf_PROTOC_LIBRARIES})
+    target_link_libraries(echo_test PRIVATE echo ${PROTOBUF_TARGETS})
     target_include_directories(echo_test PRIVATE ${Protobuf_INCLUDE_DIRS})
 
     # Copy test config and test proto to build directory

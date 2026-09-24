@@ -56,35 +56,12 @@ MyLog(const char *file, const char *func, int line, const char *fmt, ...)
 #define MYLOG(...) MyLog(__FILE__, __func__, __LINE__, __VA_ARGS__)
 
 /* -----------------------------------------------------------------------
- * Error collector: silently swallows protobuf import warnings/errors
- * (replace with a logging version if needed for debugging).
- * --------------------------------------------------------------------- */
-class SilentErrorCollector : public MultiFileErrorCollector
-{
-public:
-    void AddError(const std::string &filename, int line, int column,
-                  const std::string &message) override
-    {
-        MYLOG("Proto error %s:%d:%d: %s",
-              filename.c_str(), line, column, message.c_str());
-    }
-
-    void AddWarning(const std::string &filename, int line, int column,
-                    const std::string &message) override
-    {
-        MYLOG("Proto warning %s:%d:%d: %s",
-              filename.c_str(), line, column, message.c_str());
-    }
-};
-
-/* -----------------------------------------------------------------------
  * Global state
  * --------------------------------------------------------------------- */
 static CMsgLoader                    g_config;
 static std::map<int, std::string>    g_msgMap;   // id → message type name
 static std::string                   g_result;   // scratch buffer for C API
 static DiskSourceTree               *g_sourceTree = nullptr;
-static SilentErrorCollector         *g_errCollector = nullptr;
 static Importer                     *g_importer  = nullptr;
 static DynamicMessageFactory        *g_factory   = nullptr;
 
@@ -104,14 +81,12 @@ extern "C" void ini_msg()
 
     delete g_factory;     g_factory     = nullptr;
     delete g_importer;    g_importer    = nullptr;
-    delete g_errCollector; g_errCollector = nullptr;
     delete g_sourceTree;  g_sourceTree  = nullptr;
 
     g_sourceTree   = new DiskSourceTree();
     g_sourceTree->MapPath("", "./");   // look up .proto in CWD
 
-    g_errCollector = new SilentErrorCollector();
-    g_importer     = new Importer(g_sourceTree, g_errCollector);
+    g_importer     = new Importer(g_sourceTree, nullptr);
     g_factory      = new DynamicMessageFactory();
 
     const FileDescriptor *fd = g_importer->Import(protoname);
@@ -139,8 +114,9 @@ extern "C" void ini_msg()
             continue;
         }
 
-        g_msgMap[id] = desc->full_name();
-        MYLOG("Registered id=%d name=%s", id, desc->full_name().c_str());
+        std::string fname(desc->full_name());
+        g_msgMap[id] = fname;
+        MYLOG("Registered id=%d name=%s", id, fname.c_str());
     }
 
     MYLOG("ini_msg done, %zu messages registered", g_msgMap.size());

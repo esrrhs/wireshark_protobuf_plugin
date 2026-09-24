@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test-linux:
+    name: Build & Test (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake protobuf-compiler libprotobuf-dev
+
+      - name: Build libecho & Run Tests
+        run: |
+          cmake -S libecho -B libecho/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+          cmake --build libecho/build --config Release
+          ctest --test-dir libecho/build --output-on-failure
+
+  test-windows:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Protobuf via vcpkg
+        run: |
+          vcpkg install protobuf:x64-windows
+
+      - name: Build libecho & Run Tests
+        run: |
+          cmake -S libecho -B libecho/build `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTS=ON
+          cmake --build libecho/build --config Release
+          ctest --test-dir libecho/build -C Release --output-on-failure

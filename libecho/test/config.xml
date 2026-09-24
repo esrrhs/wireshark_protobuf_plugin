@@ -1,0 +1,5 @@
+<Msg>
+    <Config port="12345" proto="test.proto" clientregid="1" serverregid="101" regkey="aaa" key="bbb"/>
+    <MsgId id="1001" name="testpkg.LoginRequest"/>
+    <MsgId id="1002" name="testpkg.LoginResponse"/>
+</Msg>

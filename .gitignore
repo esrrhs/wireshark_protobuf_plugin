@@ -1,0 +1,32 @@
+# Build outputs
+build/
+out/
+*.o
+*.a
+*.so
+*.dll
+*.lib
+*.exp
+*.pdb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+
+# Visual Studio / MSVC
+*.vcxproj.user
+*.suo
+*.sdf
+.vs/
+
+# Logs written at runtime
+evil.log
+evil_myname.log
+
+# macOS
+.DS_Store

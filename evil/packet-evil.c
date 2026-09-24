@@ -1,3 +1,11 @@
+/* packet-evil.c
+ *
+ * Wireshark Protobuf Dissector Plugin
+ * Supports Wireshark 3.x / 4.x
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #include "config.h"
 
 #include <glib.h>
@@ -7,271 +15,246 @@
 #include <epan/packet.h>
 #include <epan/prefs.h>
 #include <epan/expert.h>
+#include <epan/reassemble.h>
+#include <epan/proto.h>
 
-/* IF PROTO exposes code to other dissectors, then it must be exported
-   in a header file. If not, a header file is not needed at all. */
 #include "packet-evil.h"
 
+/* -----------------------------------------------------------------------
+ * Protocol handle
+ * --------------------------------------------------------------------- */
 static int proto_evil = -1;
 
-/* Initialize the protocol and registered fields */
-static int hf_evil_hdr_msg_packetid = -1;
+/* Header field handles */
+static int hf_evil_hdr_msg_datasize  = -1;
+static int hf_evil_hdr_msg_packetid  = -1;
 static int hf_evil_hdr_msg_packetname = -1;
-static int hf_evil_hdr_msg_datasize = -1;
-static int hf_evil_hdr_msg_body = -1;
+static int hf_evil_hdr_msg_body      = -1;
 
-/* Initialize the subtree pointers */
+/* Subtree handles */
 static gint ett_evil = -1;
 
-/* Preferences */
-static guint evil_tcp_port = 0;
+/* -----------------------------------------------------------------------
+ * Protocol constants
+ *   Frame layout:
+ *     [4 bytes datasize][2 bytes packetid][datasize-2 bytes body]
+ *   Total frame = 4 + datasize  bytes
+ * --------------------------------------------------------------------- */
+#define FRAME_HDR_LEN        6   /* 4-byte length + 2-byte packet-id    */
+#define FRAME_SIZE_OFFSET    0   /* offset of the 4-byte length field   */
+#define FRAME_ID_OFFSET      4   /* offset of the 2-byte packet-id      */
+#define FRAME_BODY_OFFSET    6   /* offset of the protobuf body         */
 
-#define evil_buffer_size 102400
-static char evil_buffer[evil_buffer_size];
-
-#define MYLOG(...) MyLog(__FILE__, __FUNCTION__, __LINE__, __VA_ARGS__);
-
-void MyLog(const char * file, const char * func, int pos, const char *fmt, ...)
+/* -----------------------------------------------------------------------
+ * Simple file logger
+ * --------------------------------------------------------------------- */
+#ifdef EVIL_DEBUG_LOG
+static void
+my_log(const char *file, const char *func, int line, const char *fmt, ...)
 {
-	FILE *pLog = NULL;
-	time_t clock1;
-	struct tm * tptr;
-	va_list ap;
-	
-	pLog = fopen("evil_myname.log", "a+");
-	if (pLog == NULL)
-	{
-		return;
-	}
-	
-	clock1 = time(0);
-	tptr = localtime(&clock1);
+    FILE   *fp;
+    time_t  t = time(NULL);
+    struct tm *tm_info = localtime(&t);
+    va_list ap;
 
-	fprintf(pLog, "===========================[%d.%d.%d, %d.%d.%d]%s:%d,%s:===========================\n", 
-		tptr->tm_year+1990,tptr->tm_mon+1,
-		tptr->tm_mday,tptr->tm_hour,tptr->tm_min,
-		tptr->tm_sec,file,pos,func);
+    fp = fopen("evil.log", "a+");
+    if (!fp)
+        return;
 
-	va_start(ap, fmt);
-	vfprintf(pLog, fmt, ap);
-	fprintf(pLog, "\n\n");
-	va_end(ap);
+    fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d] %s:%d %s: ",
+            tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+            tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec,
+            file, line, func);
 
-	fclose(pLog);
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+#define MYLOG(...) my_log(__FILE__, __func__, __LINE__, __VA_ARGS__)
+#else
+#define MYLOG(...) do {} while (0)
+#endif /* EVIL_DEBUG_LOG */
+
+/* -----------------------------------------------------------------------
+ * PDU length callback  (called by tcp_dissect_pdus)
+ * --------------------------------------------------------------------- */
+static guint
+get_evil_message_len(packet_info *pinfo _U_, tvbuff_t *tvb,
+                     int offset, void *data _U_)
+{
+    /*
+     * The 4-byte field holds the "data" portion size (packet-id + body).
+     * The full frame is:  4 (length field) + datasize  bytes.
+     */
+    guint32 datasize = tvb_get_ntohl(tvb, offset + FRAME_SIZE_OFFSET);
+    guint   total    = 4 + datasize;
+
+    MYLOG("get_evil_message_len datasize=%u total=%u", datasize, total);
+    return total;
 }
 
-#define FRAME_HEADER_LEN 6
-#define FRAME_HEADER_SIZE_POS 0
-
-#define mypntoh16(p)  ((guint32)*((const guint8 *)(p)+0)<<8|  \
-                     (guint32)*((const guint8 *)(p)+1)<<0)
-
-#define mypntoh32(p)  ((guint32)*((const guint8 *)(p)+0)<<24|  \
-                     (guint32)*((const guint8 *)(p)+1)<<16|  \
-                     (guint32)*((const guint8 *)(p)+2)<<8|   \
-                     (guint32)*((const guint8 *)(p)+3)<<0)
-
-/* This method dissects fully reassembled messages */
-static int dissect_evil_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
+/* -----------------------------------------------------------------------
+ * Per-message dissector
+ * --------------------------------------------------------------------- */
+static int
+dissect_evil_message(tvbuff_t *tvb, packet_info *pinfo,
+                     proto_tree *tree, void *data _U_)
 {
-    int offset = 0;//Æ«ÒÆ±äÁ¿£¬¼ÇÂ¼Æ«ÒÆÎ»ÖÃ
-    int ret = 0;
-    proto_item * ti = NULL;//·½±ãÌí¼Ó½áµã¶ø¶¨Òå
-    proto_tree * tt = NULL; //·½±ãÌí¼Ó½áµã¶ø¶¨Òå
-    int size = 0;
-    char * p = NULL;
-    int packet_size = 0;
-    const guint8* buffer = 0;
-    int buffersize = 0;
-	char strbuf[100];
-	int headvalue = 0;
-	int packid = 0;
-	int datasize = 0;
-	int seed = 0;
-	int checksum = 0;
-	int compresssize = 0;
-	const char * pbody = 0;
-    
-    MYLOG("!!!!!!!!!!!!!!!!! dissect_evil_message start !!!!!!!!!!!!!!!!!");
+    proto_item *ti;
+    proto_tree *evil_tree;
+    guint32     datasize;
+    guint16     packid;
+    const char *msg_name;
+    const char *body_str;
+    int         body_len;
+    guint       total_len;
+    char       *line, *saveptr;
+    char       *body_copy;
+    int         offset = 0;
 
-    MYLOG("tvb_reported_length %d tvb_reported_length %d", tvb_reported_length(tvb), tvb_reported_length(tvb));
-    	
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "myname");//ÏÔÊ¾Ð­Òé
+    MYLOG("dissect_evil_message start, reported_length=%u",
+          tvb_reported_length(tvb));
+
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "myname");
     col_clear(pinfo->cinfo, COL_INFO);
 
-    if (!tree) 
-    {
-        return tvb_reported_length(tvb);
-    } 
+    total_len = tvb_reported_length(tvb);
 
-    ti = proto_tree_add_item(tree, proto_evil, tvb, 0, -1, FALSE);//Ìí¼Ó½áµã
-    tt = proto_item_add_subtree(ti, ett_evil);//Ìí¼Ó×ÓÊ÷£¬ÓÃÒÔÏÔÊ¾Êý¾Ý
-    
-    buffer = tvb_get_ptr(tvb, 0, -1);
-    buffersize = tvb_reported_length(tvb);
-    MYLOG("tvb buffer %d %p", buffersize, buffer);
+    /* Root tree item */
+    ti        = proto_tree_add_item(tree, proto_evil, tvb, 0, -1, ENC_NA);
+    evil_tree = proto_item_add_subtree(ti, ett_evil);
 
-	// ¼Ó½Úµã
-    offset = 0;
+    /* --- 4-byte data size --- */
+    datasize = tvb_get_ntohl(tvb, offset);
+    proto_tree_add_uint(evil_tree, hf_evil_hdr_msg_datasize,
+                        tvb, offset, 4, datasize);
+    offset += 4;
 
-	size = sizeof(int);
-	datasize = *(const int *)(&buffer[offset]);
-	datasize = mypntoh32(&datasize);
-	proto_tree_add_int(tt, hf_evil_hdr_msg_datasize, tvb, offset, size, datasize);
-	offset += size; 
+    /* --- 2-byte packet id --- */
+    packid   = tvb_get_ntohs(tvb, offset);
+    msg_name = get_msg_name((int)packid);
 
-    size = sizeof(short);
-	packid = *(const short *)(&buffer[offset]);
-	packid = mypntoh16(&packid);
-	sprintf(strbuf, "%s", get_msg_name(packid));
-    proto_tree_add_int(tt, hf_evil_hdr_msg_packetid, tvb, offset, size, packid);
-    proto_tree_add_string(tt, hf_evil_hdr_msg_packetname, tvb, offset, size, strbuf);
-    offset += size;
-	
-	pbody = show_msg(packid, &buffer[offset], datasize - sizeof(short));
-	size = buffersize - FRAME_HEADER_LEN + sizeof(short);
-	p = strtok(pbody, "\n");	  
-	while(p)	   
-	{ 	   
-    	proto_tree_add_string(tt, hf_evil_hdr_msg_body, tvb, offset, size, p); 
-		p = strtok(NULL, "\n");	
-	}
-	
-    MYLOG("dissect_evil ok");
+    proto_tree_add_uint(evil_tree, hf_evil_hdr_msg_packetid,
+                        tvb, offset, 2, packid);
+    proto_tree_add_string(evil_tree, hf_evil_hdr_msg_packetname,
+                          tvb, offset, 2, msg_name);
 
-    return tvb_reported_length(tvb);
+    col_add_fstr(pinfo->cinfo, COL_INFO, "PacketId=%u (%s)", packid, msg_name);
+    offset += 2;
+
+    /* --- protobuf body --- */
+    body_len = (int)total_len - offset;
+    if (body_len > 0) {
+        const guint8 *raw = tvb_get_ptr(tvb, offset, body_len);
+        body_str  = show_msg((int)packid, (const char *)raw, body_len);
+
+        /* Split multi-line body into individual tree entries */
+        body_copy = g_strdup(body_str ? body_str : "");
+        line = strtok_r(body_copy, "\n", &saveptr);
+        while (line) {
+            proto_tree_add_string(evil_tree, hf_evil_hdr_msg_body,
+                                  tvb, offset, body_len, line);
+            line = strtok_r(NULL, "\n", &saveptr);
+        }
+        g_free(body_copy);
+    }
+
+    MYLOG("dissect_evil_message done");
+    return (int)total_len;
 }
 
-/* determine PDU length of protocol foo */
-static guint get_evil_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset)
+/* -----------------------------------------------------------------------
+ * Top-level dissector  (handles TCP stream â†’ PDUs)
+ * --------------------------------------------------------------------- */
+static int
+dissect_evil(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 {
-    // length is at offset FRAME_HEADER_SIZE_POS    
-    guint len = 0; 
-    len = (guint)tvb_get_ntohl(tvb, offset + FRAME_HEADER_SIZE_POS);
-    MYLOG("get_evil_message_len src len %d", (int)len);
-    len = len + FRAME_HEADER_LEN - sizeof(short);
-    MYLOG("get_evil_message_len len %d", (int)len);
-    return len; 
+    tcp_dissect_pdus(tvb, pinfo, tree,
+                     TRUE,              /* desegment                  */
+                     FRAME_HDR_LEN,     /* fixed header size          */
+                     get_evil_message_len,
+                     dissect_evil_message,
+                     data);
+    return (int)tvb_reported_length(tvb);
 }
 
-/* The main dissecting routine */
-static int dissect_evil(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
-{
-    tcp_dissect_pdus(tvb, pinfo, tree, TRUE, FRAME_HEADER_LEN,
-                     get_evil_message_len, dissect_evil_message, 0);
-    return tvb_reported_length(tvb);
-}
-
+/* -----------------------------------------------------------------------
+ * Protocol registration
+ * --------------------------------------------------------------------- */
 void
 proto_register_evil(void)
 {
-    module_t *evil_module;
-
     static hf_register_info hf[] = {
-            {
-                &hf_evil_hdr_msg_packetid,
-                {
-                    "Packet Id",
-                    "myname.packetid",
-                    FT_INT32,
-                    BASE_DEC,
-                    NULL,
-                    0,
-                    NULL,
-                    HFILL
-                }
-            },
-            {
-                &hf_evil_hdr_msg_packetname,
-                {
-                    "Packet Name",
-                    "myname.packetname",
-                    FT_STRING,
-                    BASE_NONE,
-                    NULL,
-                    0,
-                    NULL,
-                    HFILL
-                }
-            },
-            {
-                &hf_evil_hdr_msg_datasize,
-                {
-                    "Msg Data Size",
-                    "myname.datasize",
-                    FT_INT32,
-                    BASE_DEC,
-                    NULL,
-                    0,
-                    NULL,
-                    HFILL
-                }
-            },
-            {
-                &hf_evil_hdr_msg_body,
-                {
-                    "Msg Body",
-                    "myname.msgbody",
-                    FT_STRING,
-                    BASE_NONE,
-                    NULL,
-                    0,
-                    NULL,
-                    HFILL
-                }
-            },
-		};
-			
-        /* Protocol subtree array */
+        { &hf_evil_hdr_msg_datasize,
+          { "Data Size", "myname.datasize",
+            FT_UINT32, BASE_DEC, NULL, 0,
+            "Size of the message data (packet-id + body)", HFILL }
+        },
+        { &hf_evil_hdr_msg_packetid,
+          { "Packet ID", "myname.packetid",
+            FT_UINT16, BASE_DEC, NULL, 0,
+            "Numeric identifier of the message type", HFILL }
+        },
+        { &hf_evil_hdr_msg_packetname,
+          { "Packet Name", "myname.packetname",
+            FT_STRING, BASE_NONE, NULL, 0,
+            "Name of the message type from config.xml", HFILL }
+        },
+        { &hf_evil_hdr_msg_body,
+          { "Body", "myname.body",
+            FT_STRING, BASE_NONE, NULL, 0,
+            "Decoded Protobuf body (one field per row)", HFILL }
+        },
+    };
+
     static gint *ett[] = {
         &ett_evil,
     };
 
-    MYLOG("!!!!!!!!!!!!!!!!! evil start !!!!!!!!!!!!!!!!!");
+    MYLOG("proto_register_evil start");
 
-	MYLOG("proto_register_evil");
-
-    /* Register the protocol name and description */
     proto_evil = proto_register_protocol(
-        "myname",
-        "myname",
-        "myname");
+        "MyName Protocol",   /* long name  */
+        "myname",            /* short name */
+        "myname");           /* filter name */
 
-	MYLOG("proto_register_protocol proto_evil = %d", proto_evil);
-
-    /* Required function calls to register the header fields and subtrees
-     * used */
     proto_register_field_array(proto_evil, hf, array_length(hf));
-	MYLOG("proto_register_field_array");
     proto_register_subtree_array(ett, array_length(ett));
-	MYLOG("proto_register_subtree_array");
-	
-    /* Register preferences module (See Section 2.6 for more on
-     * preferences) */
-    evil_module = prefs_register_protocol(
-        proto_evil,
-        proto_reg_handoff_evil);
 
-	MYLOG("prefs_register_protocol evil_module = %d", evil_module);
-	
-    MYLOG("proto_register_evil ok");
+    /* Register preferences so the port can be changed at runtime */
+    prefs_register_protocol(proto_evil, proto_reg_handoff_evil);
+
+    MYLOG("proto_register_evil done, proto_evil=%d", proto_evil);
 }
+
+/* -----------------------------------------------------------------------
+ * Handoff â€“ called once at startup and whenever preferences change
+ * --------------------------------------------------------------------- */
+static dissector_handle_t evil_handle = NULL;
+static guint              last_port   = 0;
 
 void
 proto_reg_handoff_evil(void)
 {
-    dissector_handle_t evil_handle;
-    FILE * portfp = NULL; 
+    int port;
 
-	ini_msg(); 
-    
-    evil_handle = create_dissector_handle(dissect_evil, proto_evil);
-	MYLOG("create_dissector_handle evil_handle = %p", evil_handle);
+    MYLOG("proto_reg_handoff_evil start");
 
-	int port = get_port();
-	MYLOG("port=%d", port);
+    ini_msg();
+    port = get_port();
 
-    dissector_add_uint("tcp.port", port, evil_handle);
+    if (evil_handle == NULL) {
+        evil_handle = create_dissector_handle(dissect_evil, proto_evil);
+    }
 
-	MYLOG("proto_reg_handoff_evil ok");
+    if (last_port != 0) {
+        dissector_delete_uint("tcp.port", last_port, evil_handle);
+    }
+
+    dissector_add_uint("tcp.port", (guint)port, evil_handle);
+    last_port = (guint)port;
+
+    MYLOG("proto_reg_handoff_evil done, port=%d", port);
 }

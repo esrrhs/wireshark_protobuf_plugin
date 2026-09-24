@@ -1,159 +1,212 @@
+// libecho.cpp
+//
+// Helper library: loads config.xml, imports a .proto file at runtime,
+// and uses the Protobuf reflection API to decode binary messages.
+//
+// Compatible with protobuf 3.x and 4.x (protobuf 3.21+).
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #include "libecho.h"
-#include <stdio.h>
-#include <time.h>
+
+#include <cstdio>
+#include <ctime>
+#include <cstring>
+#include <cstdarg>
 #include <iostream>
+#include <map>
+#include <string>
 #include <vector>
-#include <iostream>
-#include "config.h"
-#include <stdarg.h>
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/text_format.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
-using namespace std;
+#include "config.h"
+
 using namespace google::protobuf;
 using namespace google::protobuf::compiler;
 
-#define MYLOG(...) MyLog(__FILE__, __FUNCTION__, __LINE__, __VA_ARGS__);
-
-void MyLog(const char * file, const char * func, int pos, const char *fmt, ...)
+/* -----------------------------------------------------------------------
+ * File logger
+ * --------------------------------------------------------------------- */
+static void
+MyLog(const char *file, const char *func, int line, const char *fmt, ...)
 {
-	FILE *pLog = NULL;
-	time_t clock1;
-	struct tm * tptr;
-	va_list ap;
+    FILE   *fp = fopen("evil.log", "a+");
+    if (!fp) return;
 
-	pLog = fopen("evil.log", "a+");
-	if (pLog == NULL)
-	{
-		return;
-	}
+    time_t t = time(nullptr);
+    struct tm *ti = localtime(&t);
+    fprintf(fp, "[%04d-%02d-%02d %02d:%02d:%02d] %s:%d %s: ",
+            ti->tm_year + 1900, ti->tm_mon + 1, ti->tm_mday,
+            ti->tm_hour, ti->tm_min, ti->tm_sec,
+            file, line, func);
 
-	clock1 = time(0);
-	tptr = localtime(&clock1);
-
-	fprintf(pLog, "===========================[%d.%d.%d, %d.%d.%d]%s:%d,%s:===========================\n",
-		tptr->tm_year + 1990, tptr->tm_mon + 1,
-		tptr->tm_mday, tptr->tm_hour, tptr->tm_min,
-		tptr->tm_sec, file, pos, func);
-
-	va_start(ap, fmt);
-	vfprintf(pLog, fmt, ap);
-	fprintf(pLog, "\n\n");
-	va_end(ap);
-
-	fclose(pLog);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
 }
+#define MYLOG(...) MyLog(__FILE__, __func__, __LINE__, __VA_ARGS__)
 
-CMsgLoader g_config;
-std::map<int, std::string> g_msgMap;
-std::string g_str;
-Importer * g_importer;
+/* -----------------------------------------------------------------------
+ * Error collector: silently swallows protobuf import warnings/errors
+ * (replace with a logging version if needed for debugging).
+ * --------------------------------------------------------------------- */
+class SilentErrorCollector : public MultiFileErrorCollector
+{
+public:
+    void RecordError(absl::string_view filename, int line, int column,
+                     absl::string_view message) override
+    {
+        MYLOG("Proto error %s:%d:%d: %.*s",
+              std::string(filename).c_str(), line, column,
+              (int)message.size(), message.data());
+    }
+    /* pre-4.x protobuf compat */
+    void AddError(const std::string &filename, int line, int column,
+                  const std::string &message) override
+    {
+        MYLOG("Proto error %s:%d:%d: %s",
+              filename.c_str(), line, column, message.c_str());
+    }
+};
 
+/* -----------------------------------------------------------------------
+ * Global state
+ * --------------------------------------------------------------------- */
+static CMsgLoader                    g_config;
+static std::map<int, std::string>    g_msgMap;   // id → message type name
+static std::string                   g_result;   // scratch buffer for C API
+static DiskSourceTree               *g_sourceTree = nullptr;
+static SilentErrorCollector         *g_errCollector = nullptr;
+static Importer                     *g_importer  = nullptr;
+static DynamicMessageFactory        *g_factory   = nullptr;
+
+/* -----------------------------------------------------------------------
+ * C API: ini_msg
+ *   Reads config.xml, imports the .proto file, builds the descriptor map.
+ * --------------------------------------------------------------------- */
 extern "C" void ini_msg()
 {
-	if (!g_config.LoadCfg("config.xml"))
-	{
-		MYLOG("LoadCfg fail");
-		exit(0);
-	}
+    if (!g_config.LoadCfg("config.xml")) {
+        MYLOG("LoadCfg failed – aborting");
+        return;
+    }
 
-	std::string protoname = g_config.GetMsg().m_STConfig.m_strproto;
+    const std::string &protoname = g_config.GetMsg().m_STConfig.m_strproto;
+    MYLOG("proto file: %s", protoname.c_str());
 
-	DiskSourceTree sourceTree;
-	//look up .proto file in current directory
-	sourceTree.MapPath("", "./");
-	g_importer = new Importer(&sourceTree, NULL);
-	Importer & importer = *g_importer;
+    delete g_factory;     g_factory     = nullptr;
+    delete g_importer;    g_importer    = nullptr;
+    delete g_errCollector; g_errCollector = nullptr;
+    delete g_sourceTree;  g_sourceTree  = nullptr;
 
-	//runtime compile foo.proto
-	const FileDescriptor* fd = importer.Import(protoname);
-	if (!fd)
-	{
-		MYLOG("Import %s fail", protoname.c_str());
-		exit(0);
-	}
+    g_sourceTree   = new DiskSourceTree();
+    g_sourceTree->MapPath("", "./");   // look up .proto in CWD
 
-	for (int i = 0; i < g_config.GetMsg().m_vecSTMsgId.size(); i++)
-	{
-		int id = g_config.GetMsg().m_vecSTMsgId[i].m_iid;
-		std::string name = g_config.GetMsg().m_vecSTMsgId[i].m_strname;
+    g_errCollector = new SilentErrorCollector();
+    g_importer     = new Importer(g_sourceTree, g_errCollector);
+    g_factory      = new DynamicMessageFactory();
 
-		const Descriptor *descriptor = importer.pool()->FindMessageTypeByName("ntesgame." + name);
-		if (!descriptor)
-		{
-			MYLOG("FindMessageTypeByName %s fail", name.c_str());
-			exit(0);
-		}
+    const FileDescriptor *fd = g_importer->Import(protoname);
+    if (!fd) {
+        MYLOG("Failed to import %s", protoname.c_str());
+        return;
+    }
 
-		// build a dynamic message by "Pair" proto
-		DynamicMessageFactory factory;
-		const Message *message = factory.GetPrototype(descriptor);
-		if (!message)
-		{
-			MYLOG("GetPrototype %s fail", name.c_str());
-			exit(0);
-		}
+    g_msgMap.clear();
+    const auto &msgs = g_config.GetMsg().m_vecSTMsgId;
+    for (const auto &entry : msgs) {
+        int         id   = entry.m_iid;
+        std::string name = entry.m_strname;
 
-		g_msgMap[id] = name;
-		Message * tmp = message->New();
-		delete tmp;
-	}
+        // Try with package prefix first, then bare name
+        const Descriptor *desc =
+            g_importer->pool()->FindMessageTypeByName(name);
+        if (!desc) {
+            // Try common package prefixes from the config
+            std::string qualified = "ntesgame." + name;
+            desc = g_importer->pool()->FindMessageTypeByName(qualified);
+        }
+        if (!desc) {
+            MYLOG("FindMessageTypeByName(%s) failed", name.c_str());
+            continue;
+        }
 
-	MYLOG("ini_msg ok");
+        g_msgMap[id] = desc->full_name();
+        MYLOG("Registered id=%d name=%s", id, desc->full_name().c_str());
+    }
+
+    MYLOG("ini_msg done, %zu messages registered", g_msgMap.size());
 }
 
-extern "C" const char * get_msg_name(int id)
+/* -----------------------------------------------------------------------
+ * C API: get_msg_name
+ * --------------------------------------------------------------------- */
+extern "C" const char *get_msg_name(int id)
 {
-	if (g_msgMap.find(id) != g_msgMap.end())
-	{
-		g_str = g_msgMap[id];
-		return g_str.c_str();
-	}
-	return "unknow";
+    auto it = g_msgMap.find(id);
+    if (it != g_msgMap.end()) {
+        g_result = it->second;
+        return g_result.c_str();
+    }
+    return "unknown";
 }
 
-extern "C" const char * show_msg(int id, const char * data, int srclen)
+/* -----------------------------------------------------------------------
+ * C API: show_msg
+ *   Deserializes binary proto data and returns a human-readable string.
+ * --------------------------------------------------------------------- */
+extern "C" const char *show_msg(int id, const char *data, int srclen)
 {
-	if (g_msgMap.find(id) == g_msgMap.end())
-	{
-		return "no such msg id";
-	}
+    if (!g_importer || !g_factory) {
+        return "(not initialized)";
+    }
 
-	std::string name = g_msgMap[id];
+    auto it = g_msgMap.find(id);
+    if (it == g_msgMap.end()) {
+        return "(unknown message id)";
+    }
 
-	Importer & importer = *g_importer;
-	const Descriptor *descriptor = importer.pool()->FindMessageTypeByName("ntesgame." + name);
-	if (!descriptor)
-	{
-		return "FindMessageTypeByName fail";
-	}
+    const Descriptor *desc =
+        g_importer->pool()->FindMessageTypeByName(it->second);
+    if (!desc) {
+        return "(descriptor not found)";
+    }
 
-	// build a dynamic message by "Pair" proto
-	DynamicMessageFactory factory;
-	const Message *message = factory.GetPrototype(descriptor);
-	if (!message)
-	{
-		return "GetPrototype fail";
-	}
+    const Message *prototype = g_factory->GetPrototype(desc);
+    if (!prototype) {
+        return "(no prototype)";
+    }
 
-	Message * msg = message->New();
+    Message *msg = prototype->New();
+    if (!msg->ParseFromArray(data, srclen)) {
+        delete msg;
+        return "(ParseFromArray failed – malformed data?)";
+    }
 
-	if (!msg->ParseFromArray(data, srclen))
-	{
-		return "ParseFromArray fail";
-	}
+    // Use TextFormat for a stable, UTF-8 safe output
+    g_result.clear();
+    if (!TextFormat::PrintToString(*msg, &g_result)) {
+        delete msg;
+        return "(TextFormat::PrintToString failed)";
+    }
 
-	g_str = msg->Utf8DebugString();
-
-	delete msg;
-
-	return g_str.c_str();
+    delete msg;
+    return g_result.c_str();
 }
 
+/* -----------------------------------------------------------------------
+ * C API: get_port
+ * --------------------------------------------------------------------- */
 extern "C" int get_port()
 {
-	return g_config.GetMsg().m_STConfig.m_iport;
+    return g_config.GetMsg().m_STConfig.m_iport;
 }

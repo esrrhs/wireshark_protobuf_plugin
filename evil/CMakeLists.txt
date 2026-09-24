@@ -1,78 +1,75 @@
-# CMakeLists.txt
+# CMakeLists.txt  –  Wireshark dissector plugin: evil
 #
 # Wireshark - Network traffic analyzer
-# By Gerald Combs <gerald@wireshark.org>
-# Copyright 1998 Gerald Combs
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-#
+# Compatible with Wireshark 3.x / 4.x CMake build system.
 
 include(WiresharkPlugin)
 
 # Plugin name and version info (major minor micro extra)
-set_module_info(evil 1 1 0 0)
+set_module_info(evil 1 0 0 0)
 
 set(DISSECTOR_SRC
-	packet-evil.c
-)
-
-set(DISSECTOR_SUPPORT_SRC
+    packet-evil.c
 )
 
 set(PLUGIN_FILES
-	plugin.c
-	${DISSECTOR_SRC}
-	${DISSECTOR_SUPPORT_SRC}
+    plugin.c
+    ${DISSECTOR_SRC}
 )
 
 set(CLEAN_FILES
-	${PLUGIN_FILES}
+    ${PLUGIN_FILES}
 )
 
-if (WERROR_COMMON_FLAGS)
-	set_source_files_properties(
-		${CLEAN_FILES}
-		PROPERTIES
-		COMPILE_FLAGS ${WERROR_COMMON_FLAGS}
-	)
+if(WERROR_COMMON_FLAGS)
+    set_source_files_properties(
+        ${CLEAN_FILES}
+        PROPERTIES
+        COMPILE_FLAGS ${WERROR_COMMON_FLAGS}
+    )
 endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-register_dissector_files(plugin.c
-	plugin
-	${DISSECTOR_SRC}
-	${DISSECTOR_SUPPORT_SRC}
+# Link against libecho (protobuf helper) and protobuf
+find_package(Protobuf REQUIRED)
+
+register_plugin_files(plugin.c
+    plugin
+    ${DISSECTOR_SRC}
 )
 
-add_plugin_library(evil)
+add_plugin_library(evil epan)
+
+target_include_directories(evil PRIVATE
+    ${Protobuf_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../libecho/libecho
+)
+
+target_link_libraries(evil PRIVATE
+    ${Protobuf_LIBRARIES}
+    echo      # libecho – built separately (see libecho/)
+)
 
 install(TARGETS evil
-	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION} NAMELINK_SKIP
-	RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION}
-	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION}
+    LIBRARY DESTINATION
+        ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION}/epan
+        NAMELINK_SKIP
+    RUNTIME DESTINATION
+        ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION}/epan
+    ARCHIVE DESTINATION
+        ${CMAKE_INSTALL_LIBDIR}/${CPACK_PACKAGE_NAME}/plugins/${CPACK_PACKAGE_VERSION}/epan
 )
 
 file(GLOB DISSECTOR_HEADERS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "*.h")
 CHECKAPI(
-	NAME
-	  evil
-	SWITCHES
-	  -g abort -g termoutput -build
-	SOURCES
-	  ${DISSECTOR_SRC}
-	  ${DISSECTOR_SUPPORT_SRC}
-	  ${DISSECTOR_HEADERS}
+    NAME
+      evil
+    SWITCHES
+      -g abort -g termoutput -build
+    SOURCES
+      ${DISSECTOR_SRC}
+      ${DISSECTOR_HEADERS}
 )

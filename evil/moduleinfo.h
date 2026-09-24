@@ -1,18 +1,16 @@
-/* Included *after* config.h, in order to re-define these macros */
+/* Included *after* config.h, to override package metadata */
 
 #ifdef PACKAGE
-#undef PACKAGE
+# undef PACKAGE
 #endif
-
-/* Name of package */
 #define PACKAGE "evil"
 
-
 #ifdef VERSION
-#undef VERSION
+# undef VERSION
 #endif
+#define VERSION "1.0.0"
 
-/* Version number of package */
-#define VERSION "0.0.1"
-
-
+/* Canonical plugin version string used by plugin.c */
+#ifndef PLUGIN_VERSION
+# define PLUGIN_VERSION VERSION
+#endif

@@ -19,6 +19,10 @@
 
 #ifndef ENABLE_STATIC
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Use WS_DLL_PUBLIC_DEF for data *definitions* (WS_DLL_PUBLIC adds extern). */
 WS_DLL_PUBLIC_DEF const char plugin_version[] = PLUGIN_VERSION;
 WS_DLL_PUBLIC_DEF const int  plugin_want_major = WIRESHARK_VERSION_MAJOR;
@@ -47,6 +51,10 @@ uint32_t
 plugin_describe(void)
 {
     return WS_PLUGIN_DESC_DISSECTOR;
+}
+#endif
+
+#ifdef __cplusplus
 }
 #endif
 

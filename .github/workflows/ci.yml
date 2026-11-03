@@ -81,26 +81,34 @@ jobs:
           echo "CFLAGS: $WS_CFLAGS"
           echo "LIBS: $WS_LIBS"
 
-          # g++ links the C++ static libecho; link against wireshark so plugin
-          # symbols resolve under Wireshark 4.6 / GCC 15 on ubuntu-latest.
-          # Do not -DPACKAGE/-DVERSION: wireshark config.h already defines them;
-          # moduleinfo.h overrides after include.
-          g++ -shared -fPIC -Wall \
-            -DPLUGIN_VERSION=\"1.0.0\" \
-            -DHAVE_PLUGINS=1 \
-            $WS_CFLAGS \
-            -Ievil -Ilibecho/libecho \
-            evil/packet-evil.c evil/plugin.c \
+          # Compile plugin sources as C (g++ would mangle plugin_* / give const
+          # globals internal linkage, so tshark cannot g_module_symbol them).
+          # Link with g++ for the C++ static library libecho.
+          # Do not -DPACKAGE/-DVERSION: wireshark config.h already defines them.
+          COMMON_FLAGS="-fPIC -Wall -DPLUGIN_VERSION=\"1.0.0\" -DHAVE_PLUGINS=1 $WS_CFLAGS -Ievil -Ilibecho/libecho"
+          gcc -c $COMMON_FLAGS evil/packet-evil.c -o build_evil/packet-evil.o
+          gcc -c $COMMON_FLAGS evil/plugin.c -o build_evil/plugin.o
+          g++ -shared -fPIC \
+            build_evil/packet-evil.o build_evil/plugin.o \
             libecho/build/libecho.a \
             $WS_LIBS -lprotobuf \
             -o build_evil/evil.so
+
+          echo "Exported plugin symbols:"
+          nm -D --defined-only build_evil/evil.so | grep -E 'plugin_(version|want_|register|describe)' || true
 
           PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
           mkdir -p "$PLUGIN_DIR"
           cp -f build_evil/evil.so "$PLUGIN_DIR/"
           ls -la "$PLUGIN_DIR/evil.so"
-          # Show loader errors if the plugin fails to open
-          tshark -G plugins 2>&1 | tee /tmp/ws-plugins.txt | grep -F evil.so
+
+          # Dump plugins list (and any load failures) before grepping
+          tshark -G plugins 2>/tmp/ws-plugins.err | tee /tmp/ws-plugins.txt
+          if [[ -s /tmp/ws-plugins.err ]]; then
+            echo "tshark stderr:" >&2
+            cat /tmp/ws-plugins.err >&2
+          fi
+          grep -F evil.so /tmp/ws-plugins.txt
 
           cd run_test
           output=$(tshark -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)

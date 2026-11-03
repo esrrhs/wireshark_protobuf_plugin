@@ -75,46 +75,116 @@ jobs:
           set -euxo pipefail
           mkdir -p build_evil
           WS_CFLAGS=$(pkg-config --cflags wireshark)
-          WS_LIBS=$(pkg-config --libs wireshark)
           WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
+          WS_PLUGINDIR=$(pkg-config --variable=plugindir wireshark)
           echo "Wireshark $WS_VER"
           echo "CFLAGS: $WS_CFLAGS"
-          echo "LIBS: $WS_LIBS"
+          echo "pkg-config plugindir: $WS_PLUGINDIR"
 
-          # Compile plugin sources as C (g++ would mangle plugin_* / give const
-          # globals internal linkage, so tshark cannot g_module_symbol them).
-          # Link with g++ for the C++ static library libecho.
+          # Compile plugin sources as C. Compiling plugin.c with g++ makes
+          # WS_DLL_PUBLIC_DEF visibility attributes ignored and can give the
+          # plugin_* globals internal linkage, so tshark cannot resolve them.
+          # Link with g++ only to pull in the C++ static library libecho.
+          # Do NOT link -lwireshark/-lwsutil into the plugin: leave Wireshark
+          # API symbols undefined so they resolve against the already-loaded
+          # libwireshark inside tshark (same recipe that worked on 4.2).
           # Do not -DPACKAGE/-DVERSION: wireshark config.h already defines them.
           COMMON_FLAGS="-fPIC -Wall -DPLUGIN_VERSION=\"1.0.0\" -DHAVE_PLUGINS=1 $WS_CFLAGS -Ievil -Ilibecho/libecho"
           gcc -c $COMMON_FLAGS evil/packet-evil.c -o build_evil/packet-evil.o
           gcc -c $COMMON_FLAGS evil/plugin.c -o build_evil/plugin.o
           g++ -shared -fPIC \
+            -Wl,--no-as-needed \
             build_evil/packet-evil.o build_evil/plugin.o \
             libecho/build/libecho.a \
-            $WS_LIBS -lprotobuf \
+            -lprotobuf -lstdc++ \
             -o build_evil/evil.so
 
-          echo "Exported plugin symbols:"
+          echo "=== Exported plugin symbols ==="
           nm -D --defined-only build_evil/evil.so | grep -E 'plugin_(version|want_|register|describe)' || true
+          echo "=== plugin_want_* values ==="
+          # Print the int values stored for ABI version check
+          python3 - << 'PY'
+          import struct, sys
+          from pathlib import Path
+          data = Path("build_evil/evil.so").read_bytes()
+          # fall back: use ctypes to dlopen and read symbols if possible
+          try:
+              import ctypes
+              so = ctypes.CDLL("./build_evil/evil.so", mode=ctypes.RTLD_LOCAL)
+              major = ctypes.c_int.in_dll(so, "plugin_want_major")
+              minor = ctypes.c_int.in_dll(so, "plugin_want_minor")
+              ver = ctypes.c_char_p.in_dll(so, "plugin_version")
+              print(f"plugin_version={ver.value!r} want={major.value}.{minor.value}")
+          except Exception as e:
+              print(f"ctypes probe failed: {e}")
+          PY
+          echo "=== NEEDED / ldd ==="
+          objdump -p build_evil/evil.so | awk '/NEEDED/{print}' || true
+          ldd build_evil/evil.so || true
 
-          PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
-          mkdir -p "$PLUGIN_DIR"
-          cp -f build_evil/evil.so "$PLUGIN_DIR/"
-          ls -la "$PLUGIN_DIR/evil.so"
+          echo "=== tshark folders ==="
+          tshark -G folders | tee /tmp/ws-folders.txt
+          PERS_PLUGINS=$(awk -F'\t' '/^Personal Plugins:/{print $2}' /tmp/ws-folders.txt)
+          GLOB_PLUGINS=$(awk -F'\t' '/^Global Plugins:/{print $2}' /tmp/ws-folders.txt)
+          echo "Personal Plugins dir: ${PERS_PLUGINS:-<empty>}"
+          echo "Global Plugins dir: ${GLOB_PLUGINS:-<empty>}"
 
-          # Dump plugins list (and any load failures) before grepping
-          tshark -G plugins 2>/tmp/ws-plugins.err | tee /tmp/ws-plugins.txt
+          # Install into every plausible epan dir so a path-skew cannot hide us.
+          install_plugin() {
+            local dest="$1"
+            mkdir -p "$dest"
+            cp -f build_evil/evil.so "$dest/"
+            ls -la "$dest/evil.so"
+          }
+          if [[ -n "${PERS_PLUGINS:-}" ]]; then
+            install_plugin "${PERS_PLUGINS}/epan"
+          else
+            install_plugin "$HOME/.local/lib/wireshark/plugins/$WS_VER/epan"
+          fi
+          if [[ -n "${GLOB_PLUGINS:-}" ]]; then
+            sudo mkdir -p "${GLOB_PLUGINS}/epan"
+            sudo cp -f build_evil/evil.so "${GLOB_PLUGINS}/epan/"
+            sudo ls -la "${GLOB_PLUGINS}/epan/evil.so"
+          elif [[ -n "${WS_PLUGINDIR:-}" ]]; then
+            sudo mkdir -p "${WS_PLUGINDIR}/epan"
+            sudo cp -f build_evil/evil.so "${WS_PLUGINDIR}/epan/"
+          fi
+
+          # Also expose via WIRESHARK_PLUGIN_DIR (overrides global plugin root).
+          # Layout must be $WIRESHARK_PLUGIN_DIR/<PLUGIN_PATH_ID>/epan/*.so
+          export WIRESHARK_PLUGIN_DIR="$PWD/build_evil/ws_plugins"
+          mkdir -p "$WIRESHARK_PLUGIN_DIR/$WS_VER/epan"
+          cp -f build_evil/evil.so "$WIRESHARK_PLUGIN_DIR/$WS_VER/epan/"
+
+          echo "=== tshark -G plugins (WIRESHARK_LOG_LEVEL=noisy) ==="
+          # Capture both streams; load failures go through report_failure -> stderr
+          set +e
+          WIRESHARK_LOG_LEVEL=noisy tshark -G plugins > /tmp/ws-plugins.txt 2>/tmp/ws-plugins.err
+          ts_rc=$?
+          set -e
+          echo "tshark exit=$ts_rc"
           if [[ -s /tmp/ws-plugins.err ]]; then
             echo "tshark stderr:" >&2
             cat /tmp/ws-plugins.err >&2
           fi
+          cat /tmp/ws-plugins.txt
           grep -F evil.so /tmp/ws-plugins.txt
 
           cd run_test
           output=$(tshark -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
           echo "C++ Plugin Output: $output"
           echo "$output" | grep -F "testpkg.LoginRequest"
-          rm -f "$PLUGIN_DIR/evil.so"
+
+          # Cleanup
+          rm -f "$WIRESHARK_PLUGIN_DIR/$WS_VER/epan/evil.so"
+          if [[ -n "${PERS_PLUGINS:-}" ]]; then
+            rm -f "${PERS_PLUGINS}/epan/evil.so"
+          fi
+          if [[ -n "${GLOB_PLUGINS:-}" ]]; then
+            sudo rm -f "${GLOB_PLUGINS}/epan/evil.so"
+          elif [[ -n "${WS_PLUGINDIR:-}" ]]; then
+            sudo rm -f "${WS_PLUGINDIR}/epan/evil.so"
+          fi
 
       - name: "E2E Test: Lua Script Plugin"
         run: |

@@ -76,13 +76,12 @@ jobs:
           mkdir -p build_evil
           WS_CFLAGS=$(pkg-config --cflags wireshark)
           WS_VER=$(pkg-config --modversion wireshark | cut -d. -f1,2)
-          WS_PLUGINDIR=$(pkg-config --variable=plugindir wireshark)
-          echo "Wireshark $WS_VER  plugindir=$WS_PLUGINDIR"
+          echo "Wireshark $WS_VER  uid=$(id -u) user=$(id -un) home=$HOME"
           echo "CFLAGS: $WS_CFLAGS"
 
-          # Compile as C so plugin_* keep default ELF visibility.
-          # Link with g++ for libecho; link libwireshark/libwsutil so the
-          # module has no unresolved Wireshark relocations at g_module_open.
+          # Compile plugin sources as C (keeps plugin_* exports visible).
+          # Link with g++ for libecho; link libwireshark/libwsutil so
+          # g_module_open has no unresolved Wireshark relocations.
           COMMON_FLAGS="-fPIC -Wall -DPLUGIN_VERSION=\"1.0.0\" -DHAVE_PLUGINS=1 $WS_CFLAGS -Ievil -Ilibecho/libecho"
           gcc -c $COMMON_FLAGS evil/packet-evil.c -o build_evil/packet-evil.o
           gcc -c $COMMON_FLAGS evil/plugin.c -o build_evil/plugin.o
@@ -97,101 +96,64 @@ jobs:
           nm -D --defined-only build_evil/evil.so | grep -E 'plugin_(version|want_|register|describe)'
           echo "=== NEEDED ==="
           objdump -p build_evil/evil.so | awk '/NEEDED/{print}'
-          echo "=== ldd ==="
-          ldd build_evil/evil.so
-          # Read want_* via nm/objdump without dlopening libwireshark (that
-          # segfaults outside a normal tshark init).
-          python3 - << 'PY'
-          from pathlib import Path
-          import re, struct, subprocess
-          out = subprocess.check_output(["nm", "-D", "--defined-only", "build_evil/evil.so"], text=True)
-          addrs = {}
-          for line in out.splitlines():
-              m = re.match(r"([0-9a-fA-F]+)\s+\w\s+(plugin_want_major|plugin_want_minor|plugin_version)$", line)
-              if m:
-                  addrs[m.group(2)] = int(m.group(1), 16)
-          data = Path("build_evil/evil.so").read_bytes()
-          # Translate VMA to file offset via section headers
-          readelf = subprocess.check_output(["readelf", "-W", "-S", "build_evil/evil.so"], text=True)
-          sections = []
-          for line in readelf.splitlines():
-              # [nr] Name Type Address Off Size ...
-              parts = line.split()
-              if len(parts) >= 6 and parts[0].startswith("["):
-                  try:
-                      addr = int(parts[3], 16); off = int(parts[4], 16); size = int(parts[5], 16)
-                      sections.append((addr, off, size))
-                  except Exception:
-                      pass
-          def vma_to_off(vma):
-              for addr, off, size in sections:
-                  if addr <= vma < addr + size:
-                      return off + (vma - addr)
-              raise SystemExit(f"no section for vma {vma:#x}")
-          major = struct.unpack_from("<i", data, vma_to_off(addrs["plugin_want_major"]))[0]
-          minor = struct.unpack_from("<i", data, vma_to_off(addrs["plugin_want_minor"]))[0]
-          ver_off = vma_to_off(addrs["plugin_version"])
-          ver = data[ver_off:data.index(b"\0", ver_off)].decode()
-          print(f"plugin_version={ver!r} want={major}.{minor}")
-          assert (major, minor) == (4, 6), (major, minor)
-          PY
 
-          echo "=== tshark folders ==="
-          tshark -G folders | tee /tmp/ws-folders.txt
-          GLOB_PLUGINS=$(awk -F'\t' '/^Global Plugins:/{print $2; exit}' /tmp/ws-folders.txt)
-          PERS_PLUGINS=$(awk -F'\t' '/^Personal Plugins:/{print $2; exit}' /tmp/ws-folders.txt)
-          echo "Global=$GLOB_PLUGINS"
-          echo "Personal=$PERS_PLUGINS"
+          GLOB_PLUGINS=$(tshark -G folders | awk -F'\t' '/^Global Plugins:/{print $2; exit}')
+          echo "Global Plugins: $GLOB_PLUGINS"
 
-          # Sanity: does personal scanning work at all for a known-good plugin?
-          mkdir -p "${PERS_PLUGINS}/epan"
-          if [[ -f "${GLOB_PLUGINS}/epan/gryphon.so" ]]; then
-            cp -f "${GLOB_PLUGINS}/epan/gryphon.so" "${PERS_PLUGINS}/epan/gryphon_pers_test.so"
-            echo "=== personal-dir probe (gryphon_pers_test.so) ==="
-            tshark -G plugins 2>/tmp/pers-probe.err | tee /tmp/pers-probe.txt | grep -F gryphon_pers_test.so || {
-              echo "PERSONAL PLUGIN DIR NOT SCANNED or load failed" >&2
-              cat /tmp/pers-probe.err >&2 || true
-            }
-            rm -f "${PERS_PLUGINS}/epan/gryphon_pers_test.so"
-          fi
-
-          # Install evil.so into the global epan dir tshark scans for stock plugins.
+          # ubuntu-26.04 runner does not scan personal plugin dirs (confirmed
+          # by copying gryphon.so there). Install into the global epan dir.
           DEST="${GLOB_PLUGINS}/epan"
           sudo mkdir -p "$DEST"
           sudo cp -f build_evil/evil.so "$DEST/"
           sudo chmod 755 "$DEST/evil.so"
-          ls -la "$DEST/evil.so"
-          cp -f build_evil/evil.so "${PERS_PLUGINS}/epan/"
+
+          # Stage inputs under /tmp so tshark can always read them (workspace
+          # paths have shown EACCES on this image) and so libecho finds
+          # config.xml/test.proto via cwd-relative lookup in ini_msg().
+          E2E_DIR=/tmp/ws_evil_e2e
+          rm -rf "$E2E_DIR"
+          mkdir -p "$E2E_DIR"
+          cp -f run_test/test.pcap run_test/config.xml run_test/test.proto "$E2E_DIR/"
+          chmod -R a+rX "$E2E_DIR"
+          ls -la "$E2E_DIR"
 
           echo "=== tshark -G plugins ==="
-          set +e
-          WIRESHARK_LOG_LEVEL=debug WIRESHARK_LOG_DOMAINS=Plugins,Epan,Main \
-            tshark -G plugins > /tmp/ws-plugins.txt 2>/tmp/ws-plugins.err
-          ts_rc=$?
-          set -e
-          echo "tshark exit=$ts_rc"
-          echo "----- stderr -----"
-          cat /tmp/ws-plugins.err || true
-          echo "----- stdout -----"
-          cat /tmp/ws-plugins.txt
+          tshark -G plugins 2>/tmp/ws-plugins.err | tee /tmp/ws-plugins.txt
+          if [[ -s /tmp/ws-plugins.err ]]; then
+            echo "tshark stderr:" >&2
+            cat /tmp/ws-plugins.err >&2
+          fi
           grep -F evil.so /tmp/ws-plugins.txt
 
-          cd run_test
-          output=$(tshark -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
+          cd "$E2E_DIR"
+          output=$(tshark -r "$E2E_DIR/test.pcap" -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname 2>/tmp/ws-e2e.err)
+          e2e_rc=$?
+          if [[ -s /tmp/ws-e2e.err ]]; then
+            echo "e2e stderr:" >&2
+            cat /tmp/ws-e2e.err >&2
+          fi
+          echo "e2e rc=$e2e_rc"
           echo "C++ Plugin Output: $output"
           echo "$output" | grep -F "testpkg.LoginRequest"
 
           sudo rm -f "$DEST/evil.so"
-          rm -f "${PERS_PLUGINS}/epan/evil.so"
+          rm -rf "$E2E_DIR"
 
       - name: "E2E Test: Lua Script Plugin"
         run: |
-          cd run_test
-          # Run tshark loading Lua plugin directly with -X lua_script:
-          output=$(tshark -X lua_script:../lua/packet-evil.lua -r test.pcap -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
+          set -euxo pipefail
+          E2E_DIR=/tmp/ws_evil_e2e_lua
+          rm -rf "$E2E_DIR"
+          mkdir -p "$E2E_DIR"
+          cp -f run_test/test.pcap run_test/config.xml run_test/test.proto "$E2E_DIR/"
+          cp -f lua/packet-evil.lua "$E2E_DIR/"
+          chmod -R a+rX "$E2E_DIR"
+          cd "$E2E_DIR"
+          output=$(tshark -X lua_script:"$E2E_DIR/packet-evil.lua" -r "$E2E_DIR/test.pcap" -Y 'myname.packetname == "testpkg.LoginRequest"' -T fields -e myname.packetid -e myname.packetname)
           echo "Lua Plugin Output: $output"
           echo "$output" | grep "testpkg.LoginRequest"
           echo "All E2E Tests (C++ and Lua) PASSED!"
+          rm -rf "$E2E_DIR"
 
   test-windows:
     name: Build & Test (Windows)

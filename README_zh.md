@@ -28,6 +28,8 @@ TCP 应用层数据包结构：
    - **C++ 方案**：利用 Google Protobuf 运行时反射机制（`Importer` + `DynamicMessageFactory`）进行动态反序列化，解出全部字段输出到树形节点。
 3. **展示与过滤**：Wireshark 数据包详情中将各字段以树形展示，支持完整过滤语法。
 
+单个 PDU 上限为 16 MiB。长度字段过小（不足以容纳 packet-id）、会导致 32 位总长度溢出、或超过该上限时，视为畸形帧：解析器不会请求无界 TCP 重组，也不会把同一缓冲区中的后续字节重新同步成新帧。
+
 ---
 
 ## 目录结构
@@ -35,9 +37,11 @@ TCP 应用层数据包结构：
 ```
 wireshark_protobuf_plugin/
 ├── lua/                    Lua 脚本解析器插件（推荐，免编译）
-│   └── packet-evil.lua     单文件 Lua 解析器（支持 TCP 粘包重组与 Protobuf 转发）
+│   ├── packet-evil.lua     单文件 Lua 解析器（支持 TCP 粘包重组与 Protobuf 转发）
+│   └── test_pdu_framing.lua  纯 Lua 组帧回归测试（无需 Wireshark）
 ├── evil/                   C 语言 Wireshark 插件动态库源码
 │   ├── packet-evil.c       核心解析逻辑（Dissector 实现）
+│   ├── evil_framing.h      PDU 长度策略（过小 / 过大 / 溢出）
 │   ├── plugin.c            Wireshark 插件动态加载入口
 │   ├── packet-evil.h
 │   ├── moduleinfo.h

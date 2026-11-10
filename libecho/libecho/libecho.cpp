@@ -175,6 +175,13 @@ extern "C" const char *get_msg_name(int id)
  * --------------------------------------------------------------------- */
 extern "C" const char *show_msg(int id, const char *data, int srclen)
 {
+    if (srclen < 0) {
+        return "(invalid length)";
+    }
+    if (srclen > 0 && data == nullptr) {
+        return "(invalid buffer)";
+    }
+
     if (!g_importer || !g_factory) {
         return "(not initialized)";
     }
@@ -196,7 +203,9 @@ extern "C" const char *show_msg(int id, const char *data, int srclen)
     }
 
     Message *msg = prototype->New();
-    if (!msg->ParseFromArray(data, srclen)) {
+    /* Empty body (srclen == 0) is a valid proto3 message; avoid a null pointer. */
+    const char *bytes = (srclen == 0) ? "" : data;
+    if (!msg->ParseFromArray(bytes, srclen)) {
         delete msg;
         return "(ParseFromArray failed – malformed data?)";
     }

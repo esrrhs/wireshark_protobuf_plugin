@@ -97,6 +97,48 @@ void test_show_msg()
     std::cout << "[PASS] test_show_msg_error_handling" << std::endl;
 }
 
+void test_show_msg_robustness()
+{
+    const char *err;
+
+    err = show_msg(1001, nullptr, 4);
+    TEST_CHECK(err && std::string(err) == "(invalid buffer)",
+               "NULL buffer with positive length must be rejected");
+
+    err = show_msg(1001, "x", -1);
+    TEST_CHECK(err && std::string(err) == "(invalid length)",
+               "Negative length must be rejected");
+
+    // Empty payload is a valid proto3 message (all fields defaulted).
+    err = show_msg(1001, "", 0);
+    TEST_CHECK(err != nullptr, "show_msg(empty) must not return null");
+    TEST_CHECK(std::string(err).find("ParseFromArray failed") == std::string::npos,
+               "Empty body must parse as a valid proto3 message");
+    TEST_CHECK(std::string(err) != "(invalid length)",
+               "Zero length is valid, not an invalid length");
+    TEST_CHECK(std::string(err) != "(invalid buffer)",
+               "Empty string pointer with zero length is a valid buffer");
+
+    err = show_msg(1001, nullptr, 0);
+    TEST_CHECK(err != nullptr, "show_msg(NULL, 0) must not return null");
+    TEST_CHECK(std::string(err).find("ParseFromArray failed") == std::string::npos,
+               "NULL pointer with zero length must be treated as empty message");
+
+    // Length-delimited field 1 claims 10 bytes but only 3 follow (truncated protobuf).
+    const char trunc[] = "\x0a\x0a\x61\x62\x63";
+    err = show_msg(1001, trunc, 5);
+    TEST_CHECK(err && std::string(err).find("ParseFromArray failed") != std::string::npos,
+               "Truncated protobuf payload must fail to parse");
+
+    // Overlong / unterminated varint should not crash and must fail to parse.
+    const char bad_varint[] = "\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01";
+    err = show_msg(1001, bad_varint, 10);
+    TEST_CHECK(err && std::string(err).find("ParseFromArray failed") != std::string::npos,
+               "Overlong varint payload must fail to parse");
+
+    std::cout << "[PASS] test_show_msg_robustness" << std::endl;
+}
+
 int main()
 {
     std::cout << "=== Running libecho Unit Tests ===" << std::endl;
@@ -105,6 +147,7 @@ int main()
     test_port();
     test_get_msg_name();
     test_show_msg();
+    test_show_msg_robustness();
 
     std::cout << "=== All Unit Tests Passed! ===" << std::endl;
     return 0;

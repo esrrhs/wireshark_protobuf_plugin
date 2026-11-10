@@ -30,6 +30,8 @@ TCP packet
    - **C++ plugin**: Dynamically parses `.proto` using Google Protobuf reflection (`Importer` + `DynamicMessageFactory`) and deserializes every field into the tree.
 3. Every field is rendered hierarchically in the Wireshark packet tree and is fully filterable.
 
+A single PDU is capped at 16 MiB. Length fields that are too small to hold the packet-id, that would overflow a 32-bit total, or that exceed this cap are treated as malformed: the dissector does not request unbounded TCP reassembly and does not try to resynchronize later bytes in the same buffer as a new frame.
+
 ---
 
 ## Repository layout
@@ -37,9 +39,11 @@ TCP packet
 ```
 wireshark_protobuf_plugin/
 ├── lua/                    Lua dissector plugin (Zero compilation)
-│   └── packet-evil.lua     Single-file Lua dissector with TCP desegmentation
+│   ├── packet-evil.lua     Single-file Lua dissector with TCP desegmentation
+│   └── test_pdu_framing.lua  Pure-Lua framing tests (no Wireshark required)
 ├── evil/                   Wireshark dissector plugin (C binary)
 │   ├── packet-evil.c       Dissector – main dissection logic
+│   ├── evil_framing.h      PDU length policy (min / max / overflow)
 │   ├── plugin.c            Wireshark plugin entry points
 │   ├── packet-evil.h
 │   ├── moduleinfo.h

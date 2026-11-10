@@ -8,8 +8,65 @@
 --   2. Dissects 4-byte Data Size + 2-byte Packet ID header
 --   3. Delegates Protobuf payload to Wireshark built-in Protobuf dissector
 --   4. Configurable TCP port and Packet ID -> Message mapping
+--   5. Rejects invalid / overflowing length fields without unbounded reassembly
 --
 -- SPDX-License-Identifier: GPL-2.0-or-later
+
+-- BEGIN EVIL_FRAMING
+-- Pure PDU-length policy. Keep in sync with evil/evil_framing.h.
+-- This block is extracted and unit-tested by lua/test_pdu_framing.lua;
+-- it must not depend on any Wireshark API.
+--
+-- Frame: [4-byte BE datasize][2-byte BE packet-id][datasize-2 bytes body]
+-- Total length = 4 + datasize. Minimum valid datasize is 2.
+--
+-- evil_framing.decide(remaining, datasize) assumes remaining and datasize
+-- are non-negative integers. datasize is a uint32 (0..2^32-1).
+--
+-- Returns one of:
+--   { status = "ok",        pdu_len = N }
+--   { status = "need_more", need = N }   -- N extra bytes; 0 means one more segment
+--   { status = "malformed", reason = "..." }
+--
+-- Callers must NOT request TCP desegmentation on "malformed" (avoids
+-- multi-GB reassembly) and must NOT continue parsing later PDUs in the
+-- same buffer (the stream is no longer trusted).
+
+local EVIL_LEN_FIELD_SIZE = 4
+local EVIL_FRAME_HDR_LEN  = 6
+local EVIL_MIN_DATASIZE   = 2
+-- 16 MiB cap: see EVIL_MAX_PDU_LEN in evil/evil_framing.h
+local EVIL_MAX_PDU_LEN    = 16 * 1024 * 1024
+
+local function evil_decide_pdu(remaining, datasize)
+    remaining = remaining or 0
+    datasize  = datasize or 0
+    if remaining < EVIL_LEN_FIELD_SIZE then
+        return { status = "need_more", need = 0 }
+    end
+    if datasize < EVIL_MIN_DATASIZE then
+        return { status = "malformed", reason = "data size smaller than packet-id field" }
+    end
+    -- Single check covers both the 16 MiB cap and 32-bit 4+datasize overflow
+    -- (datasize == 0xFFFFFFFF would wrap a uint32 total to 3).
+    if datasize > EVIL_MAX_PDU_LEN - EVIL_LEN_FIELD_SIZE then
+        return { status = "malformed", reason = "data size exceeds maximum or would overflow" }
+    end
+    local pdu_len = EVIL_LEN_FIELD_SIZE + datasize
+    if remaining < pdu_len then
+        return { status = "need_more", need = pdu_len - remaining }
+    end
+    return { status = "ok", pdu_len = pdu_len }
+end
+
+evil_framing = {
+    LEN_FIELD_SIZE = EVIL_LEN_FIELD_SIZE,
+    FRAME_HDR_LEN  = EVIL_FRAME_HDR_LEN,
+    MIN_DATASIZE   = EVIL_MIN_DATASIZE,
+    MAX_PDU_LEN    = EVIL_MAX_PDU_LEN,
+    decide         = evil_decide_pdu,
+}
+-- END EVIL_FRAMING
 
 local evil_proto = Proto("myname", "MyName Protocol (Lua)")
 
@@ -79,9 +136,74 @@ local pb_dissector = Dissector.get("protobuf")
 
 -- Frame layout:
 -- [4 bytes datasize (BE)][2 bytes packetid (BE)][body (datasize - 2 bytes)]
-local FRAME_HDR_LEN = 6
+local FRAME_HDR_LEN = evil_framing.FRAME_HDR_LEN
 
--- Per-message dissect routine
+local function tvb_reported_len(tvb)
+    local ok, n = pcall(function()
+        if tvb.reported_len then
+            return tvb:reported_len()
+        end
+        if tvb.reported_length then
+            return tvb:reported_length()
+        end
+        return tvb:len()
+    end)
+    if ok and type(n) == "number" then
+        return n
+    end
+    return tvb:len()
+end
+
+local function add_malformed(ti, text)
+    ti:append_text(" [" .. text .. "]")
+    if ti.add_expert_info then
+        pcall(function()
+            ti:add_expert_info(PI_MALFORMED, PI_ERROR, text)
+        end)
+    end
+end
+
+local function add_truncated(ti, text)
+    ti:append_text(" [" .. text .. "]")
+    if ti.add_expert_info then
+        pcall(function()
+            ti:add_expert_info(PI_MALFORMED, PI_WARN, text)
+        end)
+    end
+end
+
+-- Snapshot / short-frame truncation: missing bytes will not arrive later.
+-- Only display fields that are fully present (do not read a 4-byte length
+-- or 2-byte packet-id from a shorter remainder).
+local function show_truncated_pdu(tvb, pinfo, tree, offset, remaining)
+    pinfo.cols.protocol = "myname"
+    pinfo.cols.info = "Truncated PDU"
+    local ti = tree:add(evil_proto, tvb(offset, remaining))
+    if remaining >= evil_framing.LEN_FIELD_SIZE then
+        ti:add(f_datasize, tvb(offset, 4))
+        if remaining >= FRAME_HDR_LEN then
+            local packid = tvb(offset + 4, 2):uint()
+            local msg_name = msg_map[packid] or "unknown"
+            ti:add(f_packetid, tvb(offset + 4, 2))
+            ti:add(f_packetname, tvb(offset + 4, 2), msg_name)
+            local body_len = remaining - FRAME_HDR_LEN
+            if body_len > 0 and pb_dissector then
+                local pb_tvb = tvb(offset + FRAME_HDR_LEN, body_len):tvb()
+                pinfo.private["pb_msg_type"] = "message," .. msg_name
+                pcall(function()
+                    pb_dissector:call(pb_tvb, pinfo, ti)
+                end)
+            end
+        end
+    end
+    add_truncated(ti, "Truncated PDU")
+end
+
+local function is_snaplen_truncated(tvb, available)
+    return available < tvb_reported_len(tvb)
+end
+
+-- Per-message dissect routine (full, validated PDU)
 local function dissect_message(tvb, pinfo, tree)
     local total_len = tvb:len()
     if total_len < FRAME_HDR_LEN then return 0 end
@@ -121,33 +243,54 @@ function evil_proto.dissector(tvb, pinfo, tree)
     while offset < available do
         local remaining = available - offset
 
-        -- We need at least 4 bytes to know the total PDU length
-        if remaining < 4 then
+        -- Need at least 4 bytes to read the length field.
+        -- If this tvbuff was already cut short by snapshot length, the
+        -- missing bytes will not arrive later -- do not desegment.
+        if remaining < evil_framing.LEN_FIELD_SIZE then
+            if is_snaplen_truncated(tvb, available) then
+                show_truncated_pdu(tvb, pinfo, tree, offset, remaining)
+                return
+            end
             pinfo.desegment_offset = offset
             pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
             return
         end
 
         local datasize = tvb(offset, 4):uint()
-        local pdu_total_len = 4 + datasize
+        local decision = evil_framing.decide(remaining, datasize)
 
-        -- Sanity check: minimal frame must be at least 6 bytes (4 byte datasize + 2 byte id)
-        if pdu_total_len < FRAME_HDR_LEN then
-            -- Invalid frame length
+        if decision.status == "malformed" then
+            -- Do not desegment and do not parse further PDUs: framing is lost.
+            pinfo.cols.protocol = "myname"
+            pinfo.cols.info = "Invalid data size " .. tostring(datasize)
+            local ti = tree:add(evil_proto, tvb(offset, remaining))
+            ti:add(f_datasize, tvb(offset, 4))
+            add_malformed(ti, decision.reason)
             return
         end
 
-        -- Check if entire PDU is available in this buffer
-        if remaining < pdu_total_len then
+        if decision.status == "need_more" then
+            -- If this tvbuff was already cut short by snapshot length (or a
+            -- short frame), the missing bytes will not arrive in a later
+            -- segment. Show a truncated PDU instead of requesting reassembly.
+            if is_snaplen_truncated(tvb, available) then
+                show_truncated_pdu(tvb, pinfo, tree, offset, remaining)
+                return
+            end
+
             pinfo.desegment_offset = offset
-            pinfo.desegment_len = pdu_total_len - remaining
+            if decision.need and decision.need > 0 then
+                pinfo.desegment_len = decision.need
+            else
+                pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
+            end
             return
         end
 
-        local pdu_tvb = tvb(offset, pdu_total_len):tvb()
+        local pdu_tvb = tvb(offset, decision.pdu_len):tvb()
         dissect_message(pdu_tvb, pinfo, tree)
 
-        offset = offset + pdu_total_len
+        offset = offset + decision.pdu_len
     end
 end
 
